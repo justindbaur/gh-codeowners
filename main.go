@@ -4,22 +4,49 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/AlecAivazis/survey/v2"
+	"github.com/cli/go-gh/v2"
+	"github.com/cli/go-gh/v2/pkg/prompter"
 	"github.com/cli/safeexec"
 )
 
-type ownerEntry struct {
+type OwnerEntry struct {
 	file    string
 	owners  []string
 	matcher regexp.Regexp
 }
 
-func parseCodeowners(filePath string) ([]ownerEntry, error) {
+type Codeowners struct {
+	entries []OwnerEntry
+}
+
+func (co Codeowners) FindOwners(fileName []byte) []string {
+	for _, entry := range co.entries {
+		if entry.matcher.Match(fileName) {
+			return entry.owners
+		}
+	}
+
+	return []string{}
+}
+
+func (co Codeowners) IsOwnedBy(fileName []byte, owner string) bool {
+	return slices.Contains(co.FindOwners(fileName), owner)
+}
+
+type pullRequestTemplate struct {
+	Gname string `graphql:"filename"`
+	Gbody string `graphql:"body"`
+}
+
+func parseCodeowners(filePath string) (*Codeowners, error) {
 	file, err := os.Open(filePath)
 
 	if err != nil {
@@ -30,7 +57,7 @@ func parseCodeowners(filePath string) ([]ownerEntry, error) {
 
 	scanner := bufio.NewScanner(file)
 
-	ownerEntries := []ownerEntry{}
+	ownerEntries := []OwnerEntry{}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -59,11 +86,11 @@ func parseCodeowners(filePath string) ([]ownerEntry, error) {
 			return nil, fmt.Errorf("could not build regex pattern for '%s' %w", filePattern, err)
 		}
 
-		ownerEntries = append(ownerEntries, ownerEntry{file: splitLine[0], owners: splitLine[1:], matcher: *regex})
+		ownerEntries = append(ownerEntries, OwnerEntry{file: splitLine[0], owners: splitLine[1:], matcher: *regex})
 	}
 
 	slices.Reverse(ownerEntries)
-	return ownerEntries, nil
+	return &Codeowners{entries: ownerEntries}, nil
 }
 
 func main() {
@@ -109,25 +136,20 @@ func main() {
 
 		// Loop over all editted files
 		for edittedFilesScanner.Scan() {
-			for _, entry := range codeowners {
-				if entry.matcher.Match(edittedFilesScanner.Bytes()) {
-					// They are a match
-					if len(entry.owners) == 1 {
-						owner := entry.owners[0]
-						existingValue, found := singleOwnerReport[owner]
+			owners := codeowners.FindOwners(edittedFilesScanner.Bytes())
+			if len(owners) == 1 {
+				owner := owners[0]
+				existingValue, found := singleOwnerReport[owner]
 
-						if found {
-							singleOwnerReport[owner] = existingValue + 1
-						} else {
-							singleOwnerReport[owner] = 1
-						}
-					} else {
-						fmt.Printf("File '%s' is owned by multiple teams %s", edittedFilesScanner.Text(), strings.Join(entry.owners, ", "))
-					}
-					break
+				if found {
+					singleOwnerReport[owner] = existingValue + 1
+				} else {
+					singleOwnerReport[owner] = 1
 				}
+			} else if len(owners) > 1 {
+				// TODO: Could do something about unowned files here
+				fmt.Printf("File '%s' is owned by multiple teams %s\n", edittedFilesScanner.Text(), strings.Join(owners, ", "))
 			}
-			// TODO: Could do something about unowned files here
 		}
 
 		for owner, ownedFiles := range singleOwnerReport {
@@ -150,15 +172,11 @@ func main() {
 
 		// Do file staging
 		for edittedFilesScanner.Scan() {
-			for _, entry := range codeowners {
-				if entry.matcher.Match(edittedFilesScanner.Bytes()) {
-					if slices.Contains(entry.owners, team) {
-						foundFileToStage = true
-						err := exec.Command(gitBin, "add", edittedFilesScanner.Text()).Run()
-						if err != nil {
-							fmt.Printf("Failed to stage '%s'\n", edittedFilesScanner.Text())
-						}
-					}
+			if codeowners.IsOwnedBy(edittedFilesScanner.Bytes(), team) {
+				foundFileToStage = true
+				err := exec.Command(gitBin, "add", edittedFilesScanner.Text()).Run()
+				if err != nil {
+					fmt.Printf("Failed to stage '%s'\n", edittedFilesScanner.Text())
 				}
 			}
 		}
@@ -169,12 +187,227 @@ func main() {
 
 		return
 	}
+
+	if strings.EqualFold(topLevelCommand, "auto-pr") {
+		filesMap := map[string][]string{}
+		unownedFiles := []string{}
+
+		for edittedFilesScanner.Scan() {
+			owners := codeowners.FindOwners(edittedFilesScanner.Bytes())
+
+			if len(owners) == 0 {
+				unownedFiles = append(unownedFiles, edittedFilesScanner.Text())
+				continue
+			}
+
+			// TODO: Could apply different algothims to spread load
+			// For now attempt to minimize PR's by scanning if any of the owners already have an entry and if they do add it to the first one
+			var foundEntry = false
+			for _, owner := range owners {
+				existingValue, found := filesMap[owner]
+				if found {
+					// Update
+					foundEntry = true
+					filesMap[owner] = append(existingValue, edittedFilesScanner.Text())
+				}
+			}
+
+			if !foundEntry {
+				// Insert it for the first owner
+				filesMap[owners[0]] = []string{edittedFilesScanner.Text()}
+			}
+		}
+
+		// TODO: Put unowned files into a group
+		if len(filesMap) > 0 {
+			// TODO: Could accept unowned files strategy for now just shove them in the first group
+			firstKey := slices.Collect(maps.Keys(filesMap))[0]
+			filesMap[firstKey] = append(filesMap[firstKey], unownedFiles...)
+		} else if len(unownedFiles) > 0 {
+			fmt.Println("No team owns any of the files currently in the working directory")
+			return
+		} else {
+			fmt.Println("No files in the working directory")
+			return
+		}
+
+		p := prompter.New(os.Stdin, os.Stdout, os.Stderr)
+
+		branchTemplate, err := p.Input("Enter branch template", "")
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		if !strings.Contains(branchTemplate, "{team}") {
+			fmt.Println("Branch template does not contain '{team}'")
+			return
+		}
+
+		prTemplateFile, err := p.Input("Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md")
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		commitMessageTemplate, err := p.Input("Enter the commit message you want to use", "")
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		prTemplateFileContents, err := os.ReadFile(prTemplateFile)
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		prompt := &survey.Editor{
+			Message:       "PR template:",
+			FileName:      "pull_request_template.md",
+			Default:       string(prTemplateFileContents),
+			HideDefault:   true,
+			AppendDefault: true,
+		}
+
+		var contents = ""
+
+		err = survey.AskOne(prompt, &contents)
+
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		fmt.Println("Finished prompting the user.")
+
+		// surveyext.Edit(viBin, "pull_request_template", string(prTemplateFileContents), os.Stdin, os.Stdout, os.Stderr)
+
+		// err = editCmd.Wait()
+
+		// if err != nil {
+		// 	fmt.Println(err)
+		// 	return
+		// }
+
+		fmt.Printf("Creating PR's for %d teams\n", len(filesMap))
+
+		// TODO: Do loop over teams
+		for team, files := range filesMap {
+			fmt.Printf("Creating PR for team: %s\n", team)
+
+			displayName, err := p.Input("Choose display name for team '"+team+"'", team)
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			teamBranch := strings.ReplaceAll(branchTemplate, "{team}", displayName)
+
+			checkoutArgs := []string{"checkout", "-b", teamBranch}
+
+			// Checkout
+			checkoutOutput, err := exec.Command(gitBin, checkoutArgs...).Output()
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			fmt.Println("git checkout -b output")
+			os.Stdout.Write(checkoutOutput)
+
+			// Stage files for this team
+			addOutput, err := exec.Command(gitBin, append([]string{"add"}, files...)...).Output()
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			fmt.Println("git add")
+			os.Stdout.Write(addOutput)
+
+			teamCommitMessage := strings.ReplaceAll(commitMessageTemplate, "{team}", displayName)
+
+			// Create commit
+			commitArgs := []string{"commit", "--message", teamCommitMessage}
+
+			commitOutput, err := exec.Command(gitBin, commitArgs...).Output()
+
+			if err != nil {
+				fmt.Println(err)
+				os.Stderr.Write(commitOutput)
+				return
+			}
+
+			fmt.Println("git commit")
+			os.Stdout.Write(commitOutput)
+
+			// Push branch
+			// TODO: origin might not be their remote name, we might need to give them an option
+			pushArgs := []string{"push", "--set-upstream", "origin", teamBranch}
+
+			// TODO: Currently if the branch exists on remote this fails, show better error or avoid the error in the first place?
+			pushOutput, err := exec.Command(gitBin, pushArgs...).Output()
+
+			if err != nil {
+				fmt.Println(err)
+				os.Stderr.Write(pushOutput)
+				return
+			}
+
+			fmt.Println("git push")
+			os.Stdout.Write(pushOutput)
+
+			// TODO: We could make this safer and remove unsafe path characters
+			file, err := os.CreateTemp(os.TempDir(), "team_pr_body_"+displayName)
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			defer file.Close()
+			defer os.Remove(file.Name())
+
+			newString := strings.ReplaceAll(contents, "{team}", displayName)
+
+			_, err = file.WriteString(newString)
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			args := []string{"pr", "new", "--body-file", file.Name(), "--title", teamCommitMessage}
+
+			fmt.Println(args)
+
+			stdOut, stdErr, err := gh.Exec(args...)
+
+			if err != nil {
+				fmt.Println(err)
+				os.Stderr.Write(stdErr.Bytes())
+				return
+			}
+
+			// Should we do anything else here?
+			os.Stdout.Write(stdOut.Bytes())
+			os.Stderr.Write(stdErr.Bytes())
+		}
+	}
 }
 
 // Could add a lot more flexibility here
 var possibleLocations = [1]string{".github/CODEOWNERS"}
 
-func getCodeownersInfo() ([]ownerEntry, error) {
+func getCodeownersInfo() (*Codeowners, error) {
 	for _, location := range possibleLocations {
 		_, err := os.Stat(location)
 
