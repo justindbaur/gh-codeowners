@@ -339,6 +339,18 @@ func main() {
 			// Should we do anything else here?
 			os.Stdout.Write(stdOut.Bytes())
 			os.Stderr.Write(stdErr.Bytes())
+
+			// Checkout back to the last branch so we can continue with new teams or leave the user back where they were
+			checkoutOutput, err = exec.Command(gitBin, "checkout", "-").Output()
+
+			if err != nil {
+				fmt.Println(err)
+				os.Stdout.Write(checkoutOutput)
+				return
+			}
+
+			os.Stdout.Write(checkoutOutput)
+			fmt.Printf("Finished making PR for %s\n", team)
 		}
 	}
 }
