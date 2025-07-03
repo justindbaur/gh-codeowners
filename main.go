@@ -141,20 +141,36 @@ func main() {
 			}
 		}
 
-		// TODO: Put unowned files into a group
-		if len(filesMap) > 0 {
-			// TODO: Could accept unowned files strategy for now just shove them in the first group
-			firstKey := slices.Collect(maps.Keys(filesMap))[0]
-			filesMap[firstKey] = append(filesMap[firstKey], unownedFiles...)
-		} else if len(unownedFiles) > 0 {
-			fmt.Println("No team owns any of the files currently in the working directory")
-			return
-		} else {
-			fmt.Println("No files in the working directory")
-			return
+		p := prompter.New(os.Stdin, os.Stdout, os.Stderr)
+
+		if len(unownedFiles) > 0 {
+			// Let the user choose where to put unowned files
+			options := append(slices.Collect(maps.Keys(filesMap)), "Seperate")
+			optionIndex, err := p.Select(fmt.Sprintf("Choose where to put %d unowned files", len(unownedFiles)), "", options)
+
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			option := options[optionIndex]
+
+			existingValue, found := filesMap[option]
+
+			if found {
+				// Append
+				filesMap[option] = append(existingValue, unownedFiles...)
+			} else {
+				// Insert
+				filesMap[option] = unownedFiles
+			}
 		}
 
-		p := prompter.New(os.Stdin, os.Stdout, os.Stderr)
+		if len(filesMap) == 0 {
+			// Nothing to do, stop here
+			fmt.Println("There are no files to make PR's for.")
+			return
+		}
 
 		branchTemplate, err := p.Input("Enter branch template", "")
 
