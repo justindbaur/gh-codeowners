@@ -70,13 +70,25 @@ func main() {
 					singleOwnerReport[owner] = 1
 				}
 			} else if len(owners) > 1 {
-				// TODO: Could do something about unowned files here
 				fmt.Printf("File '%s' is owned by multiple teams %s\n", edittedFilesScanner.Text(), strings.Join(owners, ", "))
+			} else {
+				// TODO: Could do something about unowned files here
+				existingValue, found := singleOwnerReport[""]
+
+				if found {
+					singleOwnerReport[""] = existingValue + 1
+				} else {
+					singleOwnerReport[""] = 1
+				}
 			}
 		}
 
 		for owner, ownedFiles := range singleOwnerReport {
-			fmt.Printf("%s: %d\n", owner, ownedFiles)
+			if owner == "" {
+				fmt.Printf("Files that are unowned: %d\n", ownedFiles)
+			} else {
+				fmt.Printf("%s: %d\n", owner, ownedFiles)
+			}
 		}
 
 		return
