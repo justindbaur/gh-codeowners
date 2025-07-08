@@ -266,7 +266,9 @@ func main() {
 			checkoutOutput, err := exec.Command(gitBin, checkoutArgs...).Output()
 
 			if err != nil {
+				fmt.Println("Error doing git checkout operation")
 				fmt.Println(err)
+				os.Stdout.Write(checkoutOutput)
 				return
 			}
 
@@ -277,7 +279,9 @@ func main() {
 			addOutput, err := exec.Command(gitBin, append([]string{"add"}, files...)...).Output()
 
 			if err != nil {
+				fmt.Println("Error doing git add operation")
 				fmt.Println(err)
+				os.Stdout.Write(addOutput)
 				return
 			}
 
@@ -292,6 +296,7 @@ func main() {
 			commitOutput, err := exec.Command(gitBin, commitArgs...).Output()
 
 			if err != nil {
+				fmt.Println("Error doing git commit operation")
 				fmt.Println(err)
 				os.Stderr.Write(commitOutput)
 				return
@@ -308,6 +313,7 @@ func main() {
 			pushOutput, err := exec.Command(gitBin, pushArgs...).Output()
 
 			if err != nil {
+				fmt.Println("Error doing git push operation")
 				fmt.Println(err)
 				os.Stderr.Write(pushOutput)
 				return
@@ -344,6 +350,7 @@ func main() {
 			stdOut, stdErr, err := gh.Exec(args...)
 
 			if err != nil {
+				fmt.Println("Error creating PR with GitHub CLI")
 				fmt.Println(err)
 				os.Stderr.Write(stdErr.Bytes())
 				return
@@ -357,6 +364,7 @@ func main() {
 			checkoutOutput, err = exec.Command(gitBin, "checkout", "-").Output()
 
 			if err != nil {
+				fmt.Println("Error trying to checkout base branch")
 				fmt.Println(err)
 				os.Stdout.Write(checkoutOutput)
 				return
