@@ -336,7 +336,8 @@ func main() {
 				return
 			}
 
-			args := []string{"pr", "new", "--body-file", file.Name(), "--title", teamCommitMessage}
+			// TODO: Take option for allowing it to create drafts or not
+			args := []string{"pr", "new", "--body-file", file.Name(), "--title", teamCommitMessage, "--draft"}
 
 			fmt.Println(args)
 
