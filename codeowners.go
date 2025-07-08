@@ -73,7 +73,20 @@ func FromFile(filePath string) (*Codeowners, error) {
 			return nil, fmt.Errorf("could not build regex pattern for '%s' %w", filePattern, err)
 		}
 
-		ownerEntries = append(ownerEntries, OwnerEntry{file: splitLine[0], owners: splitLine[1:], matcher: *regex})
+		// Handle inline comments
+		startOfComment := slices.IndexFunc(splitLine[1:], func(entry string) bool {
+			return strings.HasPrefix(entry, "#")
+		})
+
+		var owners []string
+
+		if startOfComment == -1 {
+			owners = splitLine[1:]
+		} else {
+			owners = splitLine[1:startOfComment]
+		}
+
+		ownerEntries = append(ownerEntries, OwnerEntry{file: splitLine[0], owners: owners, matcher: *regex})
 	}
 
 	slices.Reverse(ownerEntries)
