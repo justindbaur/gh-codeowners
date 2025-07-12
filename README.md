@@ -18,4 +18,4 @@ Run `gh codeowners stage [team]` to stage all files for a given team.
 
 ## auto-pr
 
-Run `gh code owners auto-pr` to run through an interactive shell for quickly creating PR's for multiple teams.
+Run `gh codeowners auto-pr` to run through an interactive shell for quickly creating PR's for multiple teams.
