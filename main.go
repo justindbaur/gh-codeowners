@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -35,6 +36,7 @@ func main() {
 
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
 
 	// All commands also require currently editted files
@@ -115,20 +117,64 @@ func main() {
 					foundFileToStage = true
 					err := exec.Command(gitBin, "add", edittedFilesScanner.Text()).Run()
 					if err != nil {
-						return fmt.Errorf("Failed to stage '%s'\n", edittedFilesScanner.Text())
+						return fmt.Errorf("failed to stage '%s': %v", edittedFilesScanner.Text(), err)
 					}
 				}
 			}
 
 			if !foundFileToStage {
-				return fmt.Errorf("Did not find any files owned by '%s' run gh codeowners report to see who all owns file in your editted files.\n", team)
+				return fmt.Errorf("did not find any files owned by '%s' run gh codeowners report to see who all owns file in your editted files", team)
 			}
 
 			return nil
 		},
 	})
 
-	cmd.AddCommand(&cobra.Command{
+	cmd.AddCommand(newAutoPullRequestCmd(edittedFilesScanner, codeowners, gitBin))
+
+	err = cmd.Execute()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
+
+// Could add a lot more flexibility here
+var possibleLocations = [1]string{".github/CODEOWNERS"}
+
+func getCodeownersInfo() (*Codeowners, error) {
+	for _, location := range possibleLocations {
+		_, err := os.Stat(location)
+
+		if err != nil {
+			// Not found in that location, try the other ones
+			continue
+		}
+
+		return FromFile(location)
+	}
+
+	return nil, fmt.Errorf("could not locate a CODEOWNERS file")
+}
+
+func GetCodeowners(cmd *cobra.Command) (*Codeowners, error) {
+	return nil, errors.New("not implemented")
+}
+
+type AutoPROptions struct {
+	IsDraft        bool
+	CommitTemplate string
+	BranchTemplate string
+	// TODO: Allow body in non-interactive way
+
+	UnownedFiles string
+	DryRun       bool
+}
+
+func newAutoPullRequestCmd(edittedFilesScanner *bufio.Scanner, codeowners *Codeowners, gitBin string) *cobra.Command {
+	opts := &AutoPROptions{}
+
+	cmd := &cobra.Command{
 		Use: "auto-pr",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			filesMap := map[string][]string{}
@@ -189,15 +235,21 @@ func main() {
 				return fmt.Errorf("there are no files to make PR's for")
 			}
 
-			branchTemplate, err := p.Input("Enter branch template", "")
+			// Avoid prompting if they supplied it via a flag
+			var branchTemplate string
+			if cmd.Flags().Changed("branch") {
+				// They did supply a branch
+				branchTemplate = opts.BranchTemplate
+			} else {
+				var err error
+				branchTemplate, err = p.Input("Enter branch template", "")
 
-			if err != nil {
-				return fmt.Errorf("error while requesting branch template: %v", err)
+				if err != nil {
+					return fmt.Errorf("error while requesting branch template: %v", err)
+				}
 			}
 
-			if !strings.Contains(branchTemplate, "{team}") {
-				return fmt.Errorf("branch template does not contain '{team}'")
-			}
+			// TODO: Some validation that the branch template is going to be unique?
 
 			prTemplateFile, err := p.Input("Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md")
 
@@ -205,16 +257,22 @@ func main() {
 				return fmt.Errorf("error while requesting path to PR template: %v", err)
 			}
 
-			commitMessageTemplate, err := p.Input("Enter the commit message you want to use", "")
+			var commitMessageTemplate string
+			if cmd.Flags().Changed("commit") {
+				commitMessageTemplate = opts.CommitTemplate
+			} else {
+				var err error
+				commitMessageTemplate, err = p.Input("Enter the commit message you want to use", "")
 
-			if err != nil {
-				return fmt.Errorf("Error while getting commit message template: %v", err)
+				if err != nil {
+					return fmt.Errorf("error while getting commit message template: %v", err)
+				}
 			}
 
 			prTemplateFileContents, err := os.ReadFile(prTemplateFile)
 
 			if err != nil {
-				return fmt.Errorf("Error while reading PR template file: %v", err)
+				return fmt.Errorf("error while reading PR template file: %v", err)
 			}
 
 			prompt := &survey.Editor{
@@ -248,6 +306,14 @@ func main() {
 
 			// TODO: Do loop over teams
 			for team, files := range filesMap {
+
+				fmtOptions := &FormatOptions{
+					TeamSlug:          team,
+					NumberOfFiles:     len(files),
+					Files:             strings.Join(files, "\n"),
+					TemplateVariables: map[string]string{},
+				}
+
 				fmt.Printf("Creating PR for team: %s\n", team)
 
 				displayName, err := p.Input("Choose display name for team '"+team+"'", team)
@@ -256,7 +322,11 @@ func main() {
 					return fmt.Errorf("error requesting display name for %s: %v", team, err)
 				}
 
-				teamBranch := strings.ReplaceAll(branchTemplate, "{team}", displayName)
+				teamBranch, err := formatString(p, branchTemplate, fmtOptions)
+
+				if err != nil {
+					return fmt.Errorf("error while formatting branch template: %v", err)
+				}
 
 				checkoutArgs := []string{"checkout", "-b", teamBranch}
 
@@ -288,7 +358,11 @@ func main() {
 				fmt.Println("git add")
 				os.Stdout.Write(addOutput)
 
-				teamCommitMessage := strings.ReplaceAll(commitMessageTemplate, "{team}", displayName)
+				teamCommitMessage, err := formatString(p, commitMessageTemplate, fmtOptions)
+
+				if err != nil {
+					return fmt.Errorf("error while formatting commit message template: %v", err)
+				}
 
 				// Create commit
 				commitArgs := []string{"commit", "--message", teamCommitMessage}
@@ -336,7 +410,11 @@ func main() {
 				defer file.Close()
 				defer os.Remove(file.Name())
 
-				newString := strings.ReplaceAll(contents, "{team}", displayName)
+				newString, err := formatString(p, contents, fmtOptions)
+
+				if err != nil {
+					return fmt.Errorf("error while formatting PR body: %v", err)
+				}
 
 				_, err = file.WriteString(newString)
 
@@ -354,7 +432,7 @@ func main() {
 				stdOut, stdErr, err := gh.Exec(args...)
 
 				if err != nil {
-					return fmt.Errorf("Error creating PR with GitHub CLI: %v", err)
+					return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
 				}
 
 				// Should we do anything else here?
@@ -365,7 +443,7 @@ func main() {
 				checkoutOutput, err = exec.Command(gitBin, "checkout", "-").Output()
 
 				if err != nil {
-					return fmt.Errorf("Error trying to checkout base branch: %v", err)
+					return fmt.Errorf("error trying to checkout base branch: %v", err)
 				}
 
 				os.Stdout.Write(checkoutOutput)
@@ -374,51 +452,7 @@ func main() {
 
 			return nil
 		},
-	})
-
-	err = cmd.Execute()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
 	}
-}
-
-// Could add a lot more flexibility here
-var possibleLocations = [1]string{".github/CODEOWNERS"}
-
-func getCodeownersInfo() (*Codeowners, error) {
-	for _, location := range possibleLocations {
-		_, err := os.Stat(location)
-
-		if err != nil {
-			// Not found in that location, try the other ones
-			continue
-		}
-
-		return FromFile(location)
-	}
-
-	return nil, fmt.Errorf("could not locate a CODEOWNERS file")
-}
-
-func GetCodeowners(cmd *cobra.Command) (*Codeowners, error) {
-	return nil, errors.New("not implemented")
-}
-
-type AutoPROptions struct {
-	IsDraft        bool
-	CommitTemplate string
-	BranchTemplate string
-	// TODO: Allow body in non-interactive way
-
-	UnownedFiles string
-	DryRun       bool
-}
-
-func newAutoPullRequestCmd() *cobra.Command {
-	opts := &AutoPROptions{}
-
-	cmd := &cobra.Command{}
 
 	fl := cmd.Flags()
 	fl.BoolVarP(&opts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
@@ -436,17 +470,69 @@ func newAutoPullRequestCmd() *cobra.Command {
 }
 
 type FormatOptions struct {
-	Team      string
-	CanPrompt bool
-	Global    map[string]string
-	Scoped    map[string]string
+	TeamSlug          string
+	NumberOfFiles     int
+	Files             string
+	TemplateVariables map[string]string
 }
 
-func (formatOptions *FormatOptions) NewScope(team string) *FormatOptions {
-	return &FormatOptions{
-		Team:      team,
-		CanPrompt: formatOptions.CanPrompt,
-		Global:    formatOptions.Global,
-		Scoped:    map[string]string{},
+type SimplePrompter interface {
+	Input(prompt, defaultValue string) (string, error)
+}
+
+func formatString(p SimplePrompter, input string, options *FormatOptions) (output string, err error) {
+	// Do all reserved words first
+	output = strings.ReplaceAll(input, "{slug}", options.TeamSlug)
+	output = strings.ReplaceAll(output, "{numberOfFiles}", strconv.Itoa(options.NumberOfFiles))
+	output = strings.ReplaceAll(output, "{files}", options.Files)
+
+	// TODO: Can probably write this loop better
+	curIndex := 0
+	for {
+		if curIndex > len(output) {
+			break
+		}
+
+		partial := output[curIndex:]
+		braceIndex := strings.Index(partial, "{")
+
+		if braceIndex == -1 {
+			// Nothing more to format
+			break
+		}
+
+		endIndex := strings.Index(partial[braceIndex+1:], "}")
+
+		if endIndex == -1 {
+			// Not a valid formatted string, ignore it
+			curIndex = braceIndex
+			continue
+		}
+
+		innerText := partial[braceIndex+1 : braceIndex+1+endIndex]
+
+		existingValue, found := options.TemplateVariables[innerText]
+
+		if !found {
+			// We haven't seen this value yet, prompt for it and cache it
+			existingValue, err = p.Input(fmt.Sprintf("Enter a '%s' for team '%s'", innerText, options.TeamSlug), "")
+
+			if err != nil {
+				err = fmt.Errorf("error while prompting for '%s' for team '%s': %v", innerText, options.TeamSlug, err)
+				return
+			}
+
+			if existingValue == "" {
+				err = fmt.Errorf("input is required")
+				return
+			}
+
+			options.TemplateVariables[innerText] = existingValue
+		}
+
+		output = strings.ReplaceAll(output, fmt.Sprintf("{%s}", innerText), existingValue)
+		curIndex = braceIndex + endIndex + 2
 	}
+
+	return
 }
