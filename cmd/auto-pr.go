@@ -270,7 +270,16 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				}
 
 				// TODO: Take option for allowing it to create drafts or not
-				args := []string{"pr", "new", "--body-file", file.Name(), "--title", teamCommitMessage, "--draft"}
+				args := []string{
+					"pr",
+					"new",
+					"--body-file",
+					file.Name(),
+					"--title",
+					teamCommitMessage,
+					fmt.Sprintf("--draft=%t", autoPROpts.IsDraft),
+					fmt.Sprintf("--dry-run=%t", autoPROpts.DryRun),
+				}
 
 				cmd.Println(args)
 

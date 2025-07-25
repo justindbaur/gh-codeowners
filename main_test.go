@@ -136,7 +136,7 @@ func TestMainCoreAutoPR(t *testing.T) {
 	}).Return(nil)
 
 	testOpts.Mock.On("GhExec", mock.MatchedBy(func(cmdArgs []string) bool {
-		return cmdArgs[0] == "pr" && cmdArgs[1] == "new" && cmdArgs[2] == "--body-file" && cmdArgs[3] != "" && cmdArgs[4] == "--title" && cmdArgs[5] == "Do work for one" && cmdArgs[6] == "--draft"
+		return cmdArgs[0] == "pr" && cmdArgs[1] == "new" && cmdArgs[2] == "--body-file" && cmdArgs[3] != "" && cmdArgs[4] == "--title" && cmdArgs[5] == "Do work for one" && cmdArgs[6] == "--draft=false" && cmdArgs[7] == "--dry-run=false"
 	})).Return(*bytes.NewBuffer([]byte{}), *bytes.NewBuffer([]byte{}), nil)
 
 	testOpts.Mock.On("GitExec", []string{"checkout", "-"}).Return([]byte{}, nil)
