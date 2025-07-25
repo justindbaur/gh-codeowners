@@ -30,10 +30,7 @@ type RootCmdOptions struct {
 
 func NewCmdRoot(opts *RootCmdOptions) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:     "gh-codeowners",
-		Short:   "GitHub codeowners extension",
-		Long:    "Do work efficiently with the context of a CODEOWNERS file.",
-		Example: "  $ gh codeowners report\n  $ gh codeowners stage\n  $ gh codeowners auto-pr",
+		Use: "gh-codeowners",
 	}
 
 	rootCmd.SetHelpTemplate(
