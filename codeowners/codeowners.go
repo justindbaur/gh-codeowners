@@ -1,4 +1,4 @@
-package main
+package codeowners
 
 import (
 	"bufio"
@@ -19,7 +19,7 @@ type Codeowners struct {
 	entries []OwnerEntry
 }
 
-func (co Codeowners) FindOwners(fileName []byte) []string {
+func (co *Codeowners) FindOwners(fileName []byte) []string {
 	for _, entry := range co.entries {
 		if entry.matcher.Match(fileName) {
 			return entry.owners
@@ -29,7 +29,7 @@ func (co Codeowners) FindOwners(fileName []byte) []string {
 	return []string{}
 }
 
-func (co Codeowners) IsOwnedBy(fileName []byte, owner string) bool {
+func (co *Codeowners) IsOwnedBy(fileName []byte, owner string) bool {
 	return slices.Contains(co.FindOwners(fileName), owner)
 }
 
