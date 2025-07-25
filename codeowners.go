@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"os"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
@@ -33,16 +33,8 @@ func (co Codeowners) IsOwnedBy(fileName []byte, owner string) bool {
 	return slices.Contains(co.FindOwners(fileName), owner)
 }
 
-func FromFile(filePath string) (*Codeowners, error) {
-	file, err := os.Open(filePath)
-
-	if err != nil {
-		return nil, fmt.Errorf("file %s could not be opened", filePath)
-	}
-
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
+func FromReader(reader io.Reader) (*Codeowners, error) {
+	scanner := bufio.NewScanner(reader)
 
 	ownerEntries := []OwnerEntry{}
 
