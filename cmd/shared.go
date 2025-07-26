@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var possibleCodeownersLocations = [1]string{".github/CODEOWNERS"}
+var possibleCodeownersLocations = [3]string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
 
 func GetCodeowners(cmd *cobra.Command, opts *RootCmdOptions) (*codeowners.Codeowners, error) {
 	// TODO: Use flag maybe
