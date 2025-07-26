@@ -8,14 +8,16 @@ A GitHub (`gh`) extension for using the `CODEOWNERS` file to make strategic comm
 gh extension install justindbaur/gh-codeowners
 ```
 
-## report
+## Commands
+
+### report
 
 Run `gh codeowners report` to get a report of how many files each team owns in your current working tree.
 
-## stage
+### stage
 
 Run `gh codeowners stage [team]` to stage all files for a given team.
 
-## auto-pr
+### auto-pr
 
 Run `gh codeowners auto-pr` to run through an interactive shell for quickly creating PR's for multiple teams.
