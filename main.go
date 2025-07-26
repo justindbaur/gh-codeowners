@@ -43,7 +43,7 @@ func main() {
 				HideDefault:   true,
 				AppendDefault: true,
 			}
-			return survey.AskOne(prompt, &contents)
+			return survey.AskOne(prompt, contents)
 		},
 		ReadFile: func(filePath string) (file *cmd.File, err error) {
 			actualFile, err := os.Open(filePath)
