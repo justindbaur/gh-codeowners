@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+    "github.com/cli/cli/v2/pkg/githubtemplate"
 )
 
 type AutoPROptions struct {
@@ -20,6 +21,7 @@ type AutoPROptions struct {
 
 	UnownedFiles string
 	DryRun       bool
+	Template     string
 }
 
 func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
@@ -111,13 +113,37 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				}
 			}
 
-			// TODO: Some validation that the branch template is going to be unique?
+			var initialPrContents = ""
 
-			prTemplateFilePath, err := opts.Prompter.Input("Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md")
+            if autoPrOpts.Template == "" {
+            	// Get the top level dir another way
+            	templates := githubtemplate.FindNonLegacy(".", "PULL_REQUEST_TEMPLATE")
+            	if len(templates) > 0 {
+            		templateOption, err := opts.Prompter.Select("Select a PR template to use", "", append(templates, "Blank"))
+            		if err != nil {
+            			return fmt.Errorf("could not get PR template")
+            		}
 
-			if err != nil {
-				return fmt.Errorf("error while requesting path to PR template: %v", err)
-			}
+                    // Is this the last option that we insert for blank
+                    if len(templates) != templateOption {
+                    	templateFile, err := opts.ReadFile(templates[templateOption])
+
+                    	if err != nil {
+                    		return fmt.Errorf("problem opening selected PR template: %v", err)
+                    	}
+
+                        defer templateFile.Close()
+
+                        
+                    }            		
+            	}
+            } else {
+            	templateFile, err := opts.ReadFile(autoPrOpts.Template)
+
+            	if err != nil {
+            		return fmt.Errorf("could not open the given template file '%s': %v", autoPrOpts.Template, err)
+            	}
+            }
 
 			var commitMessageTemplate string
 			if cmd.Flags().Changed("commit") {
@@ -348,6 +374,7 @@ LEARN MORE:
 	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "What PR to put unowned files onto. `separate` to make their own PR.")
 	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
+    fl.StringVarP(&auyoPROpts.Template, "template", "T", "", "The template `file` to use when creating the templated team PR")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// TODO: Do early parse of CODEOWNERS file to help fill in option
