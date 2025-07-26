@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/justindbaur/gh-codeowners/cmd"
@@ -31,6 +32,10 @@ type TestRootCmdOptions struct {
 	In       *bytes.Buffer
 	Out      *bytes.Buffer
 	Err      *bytes.Buffer
+}
+
+func (testOpts *TestRootCmdOptions) mockTemplateHole(team string, name string, value string) {
+	testOpts.Prompter.Mock.On("Input", fmt.Sprintf("Enter a '%s' for team '%s'", name, team), "").Return(value, nil)
 }
 
 func (testOpts *TestRootCmdOptions) toActual() *cmd.RootCmdOptions {
@@ -145,4 +150,47 @@ func TestMainCoreAutoPR(t *testing.T) {
 
 	// Assert things
 	assert.NoError(t, err)
+}
+
+func TestMainCoreAutoPR_withArgsMakesTwoPRS(t *testing.T) {
+	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt\n")
+
+	opts.mockTemplateHole("@team-1", "Team Name", "one")
+	opts.mockTemplateHole("@team-2", "Team Name", "two")
+
+	err := mainCore(opts.toActual(), []string{"auto-pr", "--draft", "--commit", "commit-{Team Name}", "--branch", "branch/{Team Name}"})
+
+	opts.Mock.AssertNumberOfCalls(t, "GhExec", 2)
+
+	assert.NoError(t, err)
+}
+
+func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOptions {
+	testOpts := newTestRootOpts()
+
+	testOpts.Mock.On("ReadFile", ".github/CODEOWNERS").Return(&cmd.File{
+		Reader: bytes.NewBufferString(codeownersFile),
+		Close:  func() error { return nil },
+	}, nil)
+
+	testOpts.Mock.On("ReadFile", "./.github/PULL_REQUEST_TEMPLATE.md").Return(&cmd.File{
+		Reader: bytes.NewBufferString("My PR template!"),
+		Close:  func() error { return nil },
+	}, nil)
+
+	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
+
+	testOpts.Mock.On("AskOne", "My PR template!", mock.Anything).Run(func(args mock.Arguments) {
+		contents := args.Get(1).(*string)
+		*contents = "My PR template!\nFor {slug}: {Team Name}"
+	}).Return(nil)
+
+	testOpts.Mock.On("GitExec", []string{"--no-pager", "diff", "--name-only"}).Return([]byte(workingTree), nil)
+
+	// For anything else just pretend success
+	testOpts.Mock.On("GitExec", mock.Anything).Return([]byte{}, nil)
+
+	testOpts.Mock.On("GhExec", mock.Anything).Return(*bytes.NewBuffer([]byte{}), *bytes.NewBuffer([]byte{}), nil)
+
+	return testOpts
 }
