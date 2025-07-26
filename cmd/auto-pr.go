@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cli/cli/v2/pkg/githubtemplate"
 	"github.com/spf13/cobra"
-    "github.com/cli/cli/v2/pkg/githubtemplate"
 )
 
 type AutoPROptions struct {
@@ -115,35 +115,53 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 
 			var initialPrContents = ""
 
-            if autoPrOpts.Template == "" {
-            	// Get the top level dir another way
-            	templates := githubtemplate.FindNonLegacy(".", "PULL_REQUEST_TEMPLATE")
-            	if len(templates) > 0 {
-            		templateOption, err := opts.Prompter.Select("Select a PR template to use", "", append(templates, "Blank"))
-            		if err != nil {
-            			return fmt.Errorf("could not get PR template")
-            		}
+			if autoPROpts.Template == "" {
+				// Get the top level dir another way
+				templates := githubtemplate.FindNonLegacy(".", "PULL_REQUEST_TEMPLATE")
+				if len(templates) > 0 {
+					templateOption, err := opts.Prompter.Select("Select a PR template to use", "", append(templates, "Blank"))
+					if err != nil {
+						return fmt.Errorf("could not get PR template")
+					}
 
-                    // Is this the last option that we insert for blank
-                    if len(templates) != templateOption {
-                    	templateFile, err := opts.ReadFile(templates[templateOption])
+					// Is this the last option that we insert for blank
+					if len(templates) != templateOption {
+						templateFile, err := opts.ReadFile(templates[templateOption])
 
-                    	if err != nil {
-                    		return fmt.Errorf("problem opening selected PR template: %v", err)
-                    	}
+						if err != nil {
+							return fmt.Errorf("problem opening selected PR template: %v", err)
+						}
 
-                        defer templateFile.Close()
+						defer templateFile.Close()
 
-                        
-                    }            		
-            	}
-            } else {
-            	templateFile, err := opts.ReadFile(autoPrOpts.Template)
+						builder := new(strings.Builder)
+						_, err = io.Copy(builder, templateFile.Reader)
 
-            	if err != nil {
-            		return fmt.Errorf("could not open the given template file '%s': %v", autoPrOpts.Template, err)
-            	}
-            }
+						if err != nil {
+							return fmt.Errorf("error while reading PR template file contents: %v", err)
+						}
+
+						initialPrContents = builder.String()
+					}
+				}
+			} else {
+				templateFile, err := opts.ReadFile(autoPROpts.Template)
+
+				if err != nil {
+					return fmt.Errorf("could not open the given template file '%s': %v", autoPROpts.Template, err)
+				}
+
+				defer templateFile.Close()
+
+				builder := new(strings.Builder)
+				_, err = io.Copy(builder, templateFile.Reader)
+
+				if err != nil {
+					return fmt.Errorf("error while reading PR template file contents: %v", err)
+				}
+
+				initialPrContents = builder.String()
+			}
 
 			var commitMessageTemplate string
 			if cmd.Flags().Changed("commit") {
@@ -157,21 +175,8 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				}
 			}
 
-			prTemplateFile, err := opts.ReadFile(prTemplateFilePath)
-
-			if err != nil {
-				return fmt.Errorf("error while reading PR template file: %v", err)
-			}
-
-			prTemplateFileContents := new(strings.Builder)
-			_, err = io.Copy(prTemplateFileContents, prTemplateFile.Reader)
-
-			if err != nil {
-				return fmt.Errorf("error while reading PR template file contents: %v", err)
-			}
-
 			var contents = ""
-			err = opts.AskOne(prTemplateFileContents.String(), &contents)
+			err = opts.AskOne(initialPrContents, &contents)
 
 			if err != nil {
 				return fmt.Errorf("error while requesting PR template edit: %v", err)
@@ -374,7 +379,7 @@ LEARN MORE:
 	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "What PR to put unowned files onto. `separate` to make their own PR.")
 	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
-    fl.StringVarP(&auyoPROpts.Template, "template", "T", "", "The template `file` to use when creating the templated team PR")
+	fl.StringVarP(&autoPROpts.Template, "template", "T", "", "The template `file` to use when creating the templated team PR")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// TODO: Do early parse of CODEOWNERS file to help fill in option
