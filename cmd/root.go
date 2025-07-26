@@ -10,6 +10,7 @@ import (
 type Prompter interface {
 	Input(prompt, defaultValue string) (string, error)
 	Select(prompt, defaultValue string, options []string) (int, error)
+	Confirm(prompt string, default value bool) (bool, error)
 }
 
 type File struct {
