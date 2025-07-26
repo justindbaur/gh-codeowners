@@ -23,7 +23,7 @@ func (p *mockPrompter) Select(prompt, defaultValue string, options []string) (in
 }
 
 func (p *mock Prompter) Confirm(prompt string, defaultValue bool) (bool, error) {
-	args := p.Called(prompt, default value)
+	args := p.Called(prompt, defaultValue)
 	return args.Bool(0), args.Error(1)
 }
 
