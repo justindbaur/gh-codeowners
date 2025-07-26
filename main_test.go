@@ -140,7 +140,8 @@ func TestMainCoreAutoPR(t *testing.T) {
 	testOpts.Mock.On("GitExec", []string{"commit", "--message", "Do work for one"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"push", "--set-upstream", "origin", "branch-one"}).Return([]byte{}, nil)
 
-	testOpts.Mock.On("AskOne", "My PR template!", mock.Anything).Run(func(args mock.Arguments) {
+	// TODO: Mock with an actual PR template
+	testOpts.Mock.On("AskOne", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		contents := args.Get(1).(*string)
 		*contents = "My PR template!\nFor {slug}: {Branch Safe Team Name}"
 	}).Return(nil)
@@ -185,7 +186,7 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOpti
 
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
 
-	testOpts.Mock.On("AskOne", "My PR template!", mock.Anything).Run(func(args mock.Arguments) {
+	testOpts.Mock.On("AskOne", "", mock.Anything).Run(func(args mock.Arguments) {
 		contents := args.Get(1).(*string)
 		*contents = "My PR template!\nFor {slug}: {Team Name}"
 	}).Return(nil)
