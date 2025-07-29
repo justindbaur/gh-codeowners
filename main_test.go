@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/justindbaur/gh-codeowners/cmd"
@@ -127,6 +128,12 @@ func TestMainCoreAutoPR(t *testing.T) {
 		Close:  func() error { return nil },
 	}, nil)
 
+	tempDir, _ := os.MkdirTemp("", "test")
+
+	testOpts.Mock.On("GitExec", []string{
+		"rev-parse",
+		"--show-toplevel"}).Return(fmt.Appendf(nil, "%s\n", tempDir), nil)
+
 	testOpts.Mock.On("ReadFile", "./.github/PULL_REQUEST_TEMPLATE.md").Return(&cmd.File{
 		Reader: bytes.NewBufferString("My PR template!"),
 		Close:  func() error { return nil },
@@ -183,6 +190,12 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOpti
 		Reader: bytes.NewBufferString("My PR template!"),
 		Close:  func() error { return nil },
 	}, nil)
+
+	tempDir, _ := os.MkdirTemp("", "test")
+
+	testOpts.Mock.On("GitExec", []string{
+		"rev-parse",
+		"--show-toplevel"}).Return(fmt.Appendf(nil, "%s\n", tempDir), nil)
 
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
 

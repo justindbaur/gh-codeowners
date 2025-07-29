@@ -116,10 +116,31 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 			var initialPrContents = ""
 
 			if autoPROpts.Template == "" {
+				topLevelDirBytes, err := opts.GitExec("rev-parse", "--show-toplevel")
+
+				if err != nil {
+					return fmt.Errorf("could not find top level dir: %v", err)
+				}
+
+				topLevelDir := strings.Trim(string(topLevelDirBytes), "\n")
+
+				const filePattern = "PULL_REQUEST_TEMPLATE"
+
 				// Get the top level dir another way
-				templates := githubtemplate.FindNonLegacy(".", "PULL_REQUEST_TEMPLATE")
+				templates := githubtemplate.FindNonLegacy(topLevelDir, filePattern)
+
+				if legacyTemplate := githubtemplate.FindLegacy(topLevelDir, filePattern); legacyTemplate != "" {
+					templates = append(templates, legacyTemplate)
+				}
+
 				if len(templates) > 0 {
-					templateOption, err := opts.Prompter.Select("Select a PR template to use", "", append(templates, "Blank"))
+					templateNames := make([]string, len(templates))
+
+					for i, templatePath := range templates {
+						templateNames[i] = githubtemplate.ExtractName(templatePath)
+					}
+
+					templateOption, err := opts.Prompter.Select("Choose a template", templates[0], append(templateNames, "Start with a blank pull request"))
 					if err != nil {
 						return fmt.Errorf("could not get PR template")
 					}
