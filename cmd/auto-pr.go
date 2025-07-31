@@ -428,7 +428,7 @@ func formatString(p Prompter, input string, options *FormatOptions) (output stri
 	output = strings.ReplaceAll(input, "{slug}", options.TeamSlug)
 	output = strings.ReplaceAll(output, "{numberOfFiles}", strconv.Itoa(options.NumberOfFiles))
 	output = strings.ReplaceAll(output, "{files}", options.Files)
-	output = strings.ReplaceAll(output, "{promote}, "Made with [`gh-codeowners`](https://github.com/justindbaur/gh-codeowners)")
+	output = strings.ReplaceAll(output, "{promote}", "Made with [`gh-codeowners`](https://github.com/justindbaur/gh-codeowners)")
 
 	// TODO: Can probably write this loop better
 	curIndex := 0
