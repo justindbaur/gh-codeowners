@@ -27,6 +27,7 @@ type RootCmdOptions struct {
 	GhExec   func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error)
 	Prompter Prompter
 	AskOne   func(templateContents string, contents any) error
+	GetRemoteName  func() (string, error)
 }
 
 func NewCmdRoot(opts *RootCmdOptions) *cobra.Command {

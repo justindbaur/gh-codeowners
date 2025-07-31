@@ -9,6 +9,7 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/cli/go-gh/v2"
 	"github.com/cli/go-gh/v2/pkg/prompter"
+	"github.com/cli/go-gh/v2/pkg/repository"
 	"github.com/cli/safeexec"
 
 	"github.com/justindbaur/gh-codeowners/cmd"
@@ -58,6 +59,14 @@ func main() {
 					return actualFile.Close()
 				},
 			}, nil
+		},
+		GetRemoteName: func() (string, error) {
+			repo, err := repository.Current()
+			if err != nil {
+				return "", nil
+			}
+
+			return repo.Name, nil
 		},
 	}
 

@@ -203,6 +203,12 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				return fmt.Errorf("error while requesting PR template edit: %v", err)
 			}
 
+			remoteName, err := opts.GetRemoteName()
+
+			if err != nil {
+				return fmt.Errorf("could not determine remote name: %v", err)
+			}
+
 			cmd.Println("Finished prompting the user.")
 
 			cmd.Printf("Creating PR's for %d teams\n", len(filesMap))
@@ -278,8 +284,7 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				os.Stdout.Write(commitOutput)
 
 				// Push branch
-				// TODO: origin might not be their remote name, we might need to give them an option
-				pushArgs := []string{"push", "--set-upstream", "origin", teamBranch}
+				pushArgs := []string{"push", "--set-upstream", remoteName, teamBranch}
 
 				// TODO: Currently if the branch exists on remote this fails, show better error or avoid the error in the first place?
 				pushOutput, err := opts.GitExec(pushArgs...)

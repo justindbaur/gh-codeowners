@@ -66,6 +66,10 @@ func (testOpts *TestRootCmdOptions) toActual() *cmd.RootCmdOptions {
 			args := testOpts.Mock.MethodCalled("AskOne", templateContents, contents)
 			return args.Error(0)
 		},
+		GetRemoteName: func() (string, error) {
+			args := testOpts.Mock.MethodCalled("GetRemoteName")
+			return args.String(0), args.Error(1)
+		},
 	}
 }
 
@@ -143,6 +147,8 @@ func TestMainCoreAutoPR(t *testing.T) {
 
 	testOpts.Mock.On("GitExec", []string{"add", "test-dir/test-file.txt"}).Return([]byte{}, nil)
 
+    testOpts.Mock.On("GetRemoteName").Return("origin", nil)
+
 	testOpts.Mock.On("GitExec", []string{"checkout", "-b", "branch-one"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"commit", "--message", "Do work for one"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"push", "--set-upstream", "origin", "branch-one"}).Return([]byte{}, nil)
@@ -192,6 +198,8 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOpti
 	}, nil)
 
 	tempDir, _ := os.MkdirTemp("", "test")
+
+    testOpts.Mock.On("GetRemoteName").Return("origin", nil)
 
 	testOpts.Mock.On("GitExec", []string{
 		"rev-parse",
