@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -477,4 +478,60 @@ func formatString(p Prompter, input string, options *FormatOptions) (output stri
 	}
 
 	return
+}
+
+
+func findPrefixLength(values []string) int {
+	var longestPrefix = 0
+	var endPrefix = false
+
+    if len(values) > 0 {
+    	sort.Strings(values)
+    	first := values[0]
+    	last := values[len(values)-1]
+
+    	for i := 0; i < len(first); i++ {
+    		if !endPrefix && last[i] == first[i] {
+    			longestPrefix++
+    		} else {
+    			endPrefix = true
+    		}
+    	}
+    }
+
+	return longestPrefix
+}
+
+
+func reverse(s string) string {
+	n := len(s)
+	runes := make([]rune, n)
+	for _, rune := range s {
+		n--
+		runes[n] = rune
+	}
+
+	return string(runes[n:])
+}
+
+func reverseStrings(values []string) []string {
+	output := make([]string, len(values))
+	for i, s := range values {
+		output[i] = reverse(s)
+	}
+
+	return output
+}
+
+
+func buildShortNames(teams []string) map[string]string {
+	prefixLength := findPrefixLength(teams)
+	suffixLength := findPrefixLength(reverseStrings(teams))
+
+	output := map[string]string{}
+	for _, team := range teams {
+		output[team] = team[prefixLength:len(team)+1-suffixLength]
+	}
+
+	return output
 }

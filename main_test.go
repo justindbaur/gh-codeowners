@@ -147,7 +147,7 @@ func TestMainCoreAutoPR(t *testing.T) {
 
 	testOpts.Mock.On("GitExec", []string{"add", "test-dir/test-file.txt"}).Return([]byte{}, nil)
 
-    testOpts.Mock.On("GetRemoteName").Return("origin", nil)
+	testOpts.Mock.On("GetRemoteName").Return("origin", nil)
 
 	testOpts.Mock.On("GitExec", []string{"checkout", "-b", "branch-one"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"commit", "--message", "Do work for one"}).Return([]byte{}, nil)
@@ -199,7 +199,7 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOpti
 
 	tempDir, _ := os.MkdirTemp("", "test")
 
-    testOpts.Mock.On("GetRemoteName").Return("origin", nil)
+	testOpts.Mock.On("GetRemoteName").Return("origin", nil)
 
 	testOpts.Mock.On("GitExec", []string{
 		"rev-parse",
