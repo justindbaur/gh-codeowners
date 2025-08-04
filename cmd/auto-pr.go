@@ -32,6 +32,14 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "auto-pr",
 		Aliases: []string{"pr"},
+		Short:   "Make many PR's from one changeset",
+		Long: `The commit, branch, and PR template file are all allowed to use a go template strings. Branches are required to
+use a template string that will result in a unique name amongst all teams if one is not given, this will append a incrementing
+number to the branch name. Template strings make use of go text/template using the '{{ .TeamId }}' syntax. In addtion to 'TeamId'
+you may use 'Number' which is an incrementing number for the number of PR's being created, 'Name' which is the team name with 
+common prefixes and suffixes removed, 'Files' which is a slice of the files being added to this PR, 'Promote' is replaced with
+a link to this tool. You can also invoke the '{{ .Input "my_value" }} function. This lets you prompt yourself for a value for
+each team.'`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			edittedFilesScanner, err := GetEdittedFilesScanner(cmd, opts)
 
@@ -294,40 +302,6 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 			return nil
 		},
 	}
-
-	cmd.SetHelpTemplate(
-		`Interactively create a PR for a single team based on the files in the current working tree.
-
-USAGE:
-    gh codeowners auto-pr [flags]
-
-ALIASES:
-    pr
-
-FLAGS:
-    -c, --commit           The template string to use for the commit message for each team
-    -b, --branch           The template string to use for the branch for each team
-    -u, --unowned-files    The team or 'separate' to configure which PR to put unowned files into
-    -d, --draft            Whether or not to mark the pull requests as drafts
-    --dry-run              Print details instead of creating the PR. May still push git changes
-
-INHERITED FLAGS:
-    --help                 Show help for command
-
-EXAMPLES:
-    $ gh codeowners auto-pr
-    $ gh codeowners auto-pr --commit "Do work for {Team Name}" --branch "feature/do-{Team Name}-work" --unowned-files separate --draft
-    $ gh codeowners auto-pr --dry-run
-
-LEARN MORE:
-    The commit, branch, and PR template file are all allowed to use a template strings. Branches are required to
-    use a template string that will result in a unique name amongst all teams. Template strings make use of
-    template holes denoted by '{}', there are three reserved template holes '{slug}', '{numberOfFiles}', and '{files}'
-    the 'slug' is the team name as shown in the CODEOWNERS file. This slug is often not very branch path safe which
-    is why we recommend using a custom template hole. A custom template hole is any text surrounded by curly braces.
-    this means you can put '{My Custom Template Hole}' and will get automatically prompted to enter that value for
-    each team you are making a PR for.
-`)
 
 	fl := cmd.Flags()
 	fl.StringVarP(&autoPROpts.CommitTemplate, "commit", "c", "", "The template string to use for each commit")

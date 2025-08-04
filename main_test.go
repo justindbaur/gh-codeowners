@@ -217,6 +217,26 @@ func TestMainCoreAutoPR_withArgsMakesTwoPRS(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestMainCoreAutoPR_help(t *testing.T) {
+	opts := setupAutoPRTest("", "")
+
+	err := mainCore(opts.toActual(), []string{"auto-pr", "--help"})
+
+	assert.NoError(t, err)
+	helpOutput := opts.Out.String()
+	assert.NotEmpty(t, helpOutput)
+}
+
+func TestMainCoreAutoPR_helpLong(t *testing.T) {
+	opts := setupAutoPRTest("", "")
+
+	err := mainCore(opts.toActual(), []string{"help", "auto-pr"})
+
+	assert.NoError(t, err)
+	helpOutput := opts.Out.String()
+	assert.NotEmpty(t, helpOutput)
+}
+
 func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOptions {
 	testOpts := newTestRootOpts()
 
