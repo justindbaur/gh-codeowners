@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/justindbaur/gh-codeowners/cmd"
@@ -40,8 +41,22 @@ type TestRootCmdOptions struct {
 	Err      *bytes.Buffer
 }
 
-func (testOpts *TestRootCmdOptions) mockTemplateHole(team string, name string, value string) {
-	testOpts.Prompter.Mock.On("Input", fmt.Sprintf("Enter a '%s' for team '%s'", name, team), "").Return(value, nil)
+func (testOpts *TestRootCmdOptions) mockTemplateHole(team string, name string, value string) *mock.Call {
+	return testOpts.Prompter.Mock.On("Input", fmt.Sprintf("%s: %s", team, name), "").Return(value, nil)
+}
+
+func (testOpts *TestRootCmdOptions) mockCodeowners(codeownersContent []string) {
+	testOpts.Mock.On("ReadFile", ".github/CODEOWNERS").
+		Return(&cmd.File{
+			Reader: bytes.NewBufferString(strings.Join(codeownersContent, "\n")),
+			Close:  func() error { return nil },
+		}, nil)
+}
+
+func (testOpts *TestRootCmdOptions) mockWorkingDirectory(files []string) {
+	testOpts.Mock.
+		On("GitExec", []string{"--no-pager", "diff", "--name-only"}).
+		Return([]byte(strings.Join(files, "\n")), nil)
 }
 
 func (testOpts *TestRootCmdOptions) toActual() *cmd.RootCmdOptions {
@@ -86,12 +101,14 @@ func newTestRootOpts() *TestRootCmdOptions {
 func TestMainCoreReport(t *testing.T) {
 	testOpts := newTestRootOpts()
 
-	testOpts.Mock.On("ReadFile", ".github/CODEOWNERS").Return(&cmd.File{
-		Reader: bytes.NewBufferString("test-dir @team-1\nother-dir @team-2"),
-		Close:  func() error { return nil },
-	}, nil)
+	testOpts.mockCodeowners([]string{
+		"test-dir @team-1",
+		"other-dir @team-2",
+	})
 
-	testOpts.Mock.On("GitExec", []string{"--no-pager", "diff", "--name-only"}).Return([]byte("test-dir/test-file.txt"), nil)
+	testOpts.mockWorkingDirectory([]string{
+		"test-dir/test-file.txt",
+	})
 
 	err := mainCore(testOpts.toActual(), []string{"report"})
 
@@ -103,14 +120,18 @@ func TestMainCoreReport(t *testing.T) {
 func TestMainCoreStage(t *testing.T) {
 	testOpts := newTestRootOpts()
 
-	testOpts.Mock.On("ReadFile", ".github/CODEOWNERS").Return(&cmd.File{
-		Reader: bytes.NewBufferString("test-dir @team-1\nother-dir @team-2"),
-		Close:  func() error { return nil },
-	}, nil)
+	testOpts.mockCodeowners([]string{
+		"test-dir @team-1",
+		"other-dir @team-2",
+	})
 
-	testOpts.Mock.On("GitExec", []string{"--no-pager", "diff", "--name-only"}).Return([]byte("test-dir/test-file.txt"), nil)
+	testOpts.mockWorkingDirectory([]string{
+		"test-dir/test-file.txt",
+	})
 
-	testOpts.Mock.On("GitExec", []string{"add", "test-dir/test-file.txt"}).Return([]byte{}, nil)
+	testOpts.Mock.
+		On("GitExec", []string{"add", "test-dir/test-file.txt"}).
+		Return([]byte{}, nil)
 
 	err := mainCore(testOpts.toActual(), []string{"stage", "@team-1"})
 
@@ -122,15 +143,16 @@ func TestMainCoreStage(t *testing.T) {
 func TestMainCoreAutoPR(t *testing.T) {
 	testOpts := newTestRootOpts()
 
-	testOpts.Prompter.On("Input", "Enter branch template", "").Return("branch-{Branch Safe Team Name}", nil)
+	testOpts.Prompter.On("Input", "What branch template do you want?", "").Return("branch-{{ .Input \"Safe Name\"}}", nil)
+	testOpts.Prompter.On("Input", "What commit/PR title template do you want?", "Files for {{ .Team }}").Return("Do work for {{ .Input \"Safe Name\" }}", nil)
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
-	testOpts.Prompter.On("Input", "Enter the commit message you want to use", "").Return("Do work for {Branch Safe Team Name}", nil)
-	testOpts.Prompter.On("Input", "Enter a 'Branch Safe Team Name' for team '@team-1'", "").Return("one", nil).Once()
+	testOpts.mockTemplateHole("1", "Safe Name", "one")
+	testOpts.mockTemplateHole("2", "Safe Name", "two")
 
-	testOpts.Mock.On("ReadFile", ".github/CODEOWNERS").Return(&cmd.File{
-		Reader: bytes.NewBufferString("test-dir @team-1\nother-dir @team-2"),
-		Close:  func() error { return nil },
-	}, nil)
+	testOpts.mockCodeowners([]string{
+		"test-dir @team-1",
+		"other-dir @team-2",
+	})
 
 	tempDir, _ := os.MkdirTemp("", "test")
 
@@ -143,24 +165,35 @@ func TestMainCoreAutoPR(t *testing.T) {
 		Close:  func() error { return nil },
 	}, nil)
 
-	testOpts.Mock.On("GitExec", []string{"--no-pager", "diff", "--name-only"}).Return([]byte("test-dir/test-file.txt"), nil)
+	testOpts.mockWorkingDirectory([]string{
+		"test-dir/test-file.txt",
+		"other-dir/file.txt",
+	})
 
 	testOpts.Mock.On("GitExec", []string{"add", "test-dir/test-file.txt"}).Return([]byte{}, nil)
+	testOpts.Mock.On("GitExec", []string{"add", "other-dir/file.txt"}).Return([]byte{}, nil)
 
 	testOpts.Mock.On("GetRemoteName").Return("origin", nil)
 
 	testOpts.Mock.On("GitExec", []string{"checkout", "-b", "branch-one"}).Return([]byte{}, nil)
+	testOpts.Mock.On("GitExec", []string{"checkout", "-b", "branch-two"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"commit", "--message", "Do work for one"}).Return([]byte{}, nil)
+	testOpts.Mock.On("GitExec", []string{"commit", "--message", "Do work for two"}).Return([]byte{}, nil)
 	testOpts.Mock.On("GitExec", []string{"push", "--set-upstream", "origin", "branch-one"}).Return([]byte{}, nil)
+	testOpts.Mock.On("GitExec", []string{"push", "--set-upstream", "origin", "branch-two"}).Return([]byte{}, nil)
 
 	// TODO: Mock with an actual PR template
 	testOpts.Mock.On("AskOne", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		contents := args.Get(1).(*string)
-		*contents = "My PR template!\nFor {slug}: {Branch Safe Team Name}"
+		*contents = "My PR template!\nFor {{ .TeamId }}: {{ .Input \"Safe Name\"}}"
 	}).Return(nil)
 
 	testOpts.Mock.On("GhExec", mock.MatchedBy(func(cmdArgs []string) bool {
 		return cmdArgs[0] == "pr" && cmdArgs[1] == "new" && cmdArgs[2] == "--body-file" && cmdArgs[3] != "" && cmdArgs[4] == "--title" && cmdArgs[5] == "Do work for one" && cmdArgs[6] == "--draft=false" && cmdArgs[7] == "--dry-run=false"
+	})).Return(*bytes.NewBuffer([]byte{}), *bytes.NewBuffer([]byte{}), nil)
+
+	testOpts.Mock.On("GhExec", mock.MatchedBy(func(cmdArgs []string) bool {
+		return cmdArgs[0] == "pr" && cmdArgs[1] == "new" && cmdArgs[2] == "--body-file" && cmdArgs[3] != "" && cmdArgs[4] == "--title" && cmdArgs[5] == "Do work for two" && cmdArgs[6] == "--draft=false" && cmdArgs[7] == "--dry-run=false"
 	})).Return(*bytes.NewBuffer([]byte{}), *bytes.NewBuffer([]byte{}), nil)
 
 	testOpts.Mock.On("GitExec", []string{"checkout", "-"}).Return([]byte{}, nil)

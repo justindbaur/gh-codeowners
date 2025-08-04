@@ -1,14 +1,15 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/cli/cli/v2/pkg/githubtemplate"
 	"github.com/spf13/cobra"
@@ -100,108 +101,26 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				return fmt.Errorf("there are no files to make PR's for")
 			}
 
-			// Avoid prompting if they supplied it via a flag
-			var branchTemplate string
-			if cmd.Flags().Changed("branch") {
-				// They did supply a branch
-				branchTemplate = autoPROpts.BranchTemplate
-			} else {
-				var err error
-				branchTemplate, err = opts.Prompter.Input("Enter branch template", "")
-
-				if err != nil {
-					return fmt.Errorf("error while requesting branch template: %v", err)
-				}
+			if len(filesMap) == 1 {
+				return fmt.Errorf("only one PR would be made, it's recommended to just use `gh pr create`")
 			}
 
-			var initialPrContents = ""
-
-			if autoPROpts.Template == "" {
-				topLevelDirBytes, err := opts.GitExec("rev-parse", "--show-toplevel")
-
-				if err != nil {
-					return fmt.Errorf("could not find top level dir: %v", err)
-				}
-
-				topLevelDir := strings.Trim(string(topLevelDirBytes), "\n")
-
-				const filePattern = "PULL_REQUEST_TEMPLATE"
-
-				// Get the top level dir another way
-				templates := githubtemplate.FindNonLegacy(topLevelDir, filePattern)
-
-				if legacyTemplate := githubtemplate.FindLegacy(topLevelDir, filePattern); legacyTemplate != "" {
-					templates = append(templates, legacyTemplate)
-				}
-
-				if len(templates) > 0 {
-					templateNames := make([]string, len(templates))
-
-					for i, templatePath := range templates {
-						templateNames[i] = githubtemplate.ExtractName(templatePath)
-					}
-
-					templateOption, err := opts.Prompter.Select("Choose a template", templates[0], append(templateNames, "Start with a blank pull request"))
-					if err != nil {
-						return fmt.Errorf("could not get PR template")
-					}
-
-					// Is this the last option that we insert for blank
-					if len(templates) != templateOption {
-						templateFile, err := opts.ReadFile(templates[templateOption])
-
-						if err != nil {
-							return fmt.Errorf("problem opening selected PR template: %v", err)
-						}
-
-						defer templateFile.Close()
-
-						builder := new(strings.Builder)
-						_, err = io.Copy(builder, templateFile.Reader)
-
-						if err != nil {
-							return fmt.Errorf("error while reading PR template file contents: %v", err)
-						}
-
-						initialPrContents = builder.String()
-					}
-				}
-			} else {
-				templateFile, err := opts.ReadFile(autoPROpts.Template)
-
-				if err != nil {
-					return fmt.Errorf("could not open the given template file '%s': %v", autoPROpts.Template, err)
-				}
-
-				defer templateFile.Close()
-
-				builder := new(strings.Builder)
-				_, err = io.Copy(builder, templateFile.Reader)
-
-				if err != nil {
-					return fmt.Errorf("error while reading PR template file contents: %v", err)
-				}
-
-				initialPrContents = builder.String()
-			}
-
-			var commitMessageTemplate string
-			if cmd.Flags().Changed("commit") {
-				commitMessageTemplate = autoPROpts.CommitTemplate
-			} else {
-				var err error
-				commitMessageTemplate, err = opts.Prompter.Input("Enter the commit message you want to use", "")
-
-				if err != nil {
-					return fmt.Errorf("error while getting commit message template: %v", err)
-				}
-			}
-
-			var contents = ""
-			err = opts.AskOne(initialPrContents, &contents)
+			branchTemplate, err := getBranchTemplate(cmd, opts, autoPROpts)
 
 			if err != nil {
-				return fmt.Errorf("error while requesting PR template edit: %v", err)
+				return fmt.Errorf("problem getting branch template: %v", err)
+			}
+
+			commitTemplate, err := getCommitTemplate(cmd, opts, autoPROpts)
+
+			if err != nil {
+				return fmt.Errorf("error getting commit template: %v", err)
+			}
+
+			bodyTemplate, err := getBodyTemplate(cmd, opts, autoPROpts)
+
+			if err != nil {
+				return fmt.Errorf("error getting body template: %v", err)
 			}
 
 			remoteName, err := opts.GetRemoteName()
@@ -210,27 +129,44 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				return fmt.Errorf("could not determine remote name: %v", err)
 			}
 
-			cmd.Println("Finished prompting the user.")
+			shortNames := buildShortNames(slices.Collect(maps.Keys(filesMap)))
 
-			cmd.Printf("Creating PR's for %d teams\n", len(filesMap))
+			var number = 1
 
-			// TODO: Do loop over teams
+			// Track checked out branches so we can help "unique-ify" it for them
+			checkedOutBranches := []string{}
+
+			// TODO: Do this loop with some sort that makes it do it the same way each time
 			for team, files := range filesMap {
-
-				fmtOptions := &FormatOptions{
-					TeamSlug:          team,
-					NumberOfFiles:     len(files),
-					Files:             strings.Join(files, "\n"),
-					TemplateVariables: map[string]string{},
+				templateData := &TemplateData{
+					Number:     number,
+					TeamId:     team,
+					Name:       shortNames[team],
+					Files:      files,
+					Promote:    promotionString,
+					prompter:   opts.Prompter,
+					inputCache: map[string]string{},
 				}
+				number++
 
 				cmd.Printf("Creating PR for team: %s\n", team)
 
-				teamBranch, err := formatString(opts.Prompter, branchTemplate, fmtOptions)
+				teamBranch, err := executeToString(branchTemplate, templateData)
 
 				if err != nil {
 					return fmt.Errorf("error while formatting branch template: %v", err)
 				}
+
+				if slices.Contains(checkedOutBranches, teamBranch) {
+					cmd.Printf("Branch '%s' is not unique, adding incrementing number to the branch name\n", teamBranch)
+					// Their branch name is NOT unique, re-execute with the number thrown onto the end
+					// Technically... this branch could not be unique still but I think they are just messing with me if that's
+					// the case.
+					teamBranch = fmt.Sprintf("%s-%d", teamBranch, templateData.Number)
+				}
+
+				// Track branch
+				checkedOutBranches = append(checkedOutBranches, teamBranch)
 
 				checkoutArgs := []string{"checkout", "-b", teamBranch}
 
@@ -238,47 +174,44 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				checkoutOutput, err := opts.GitExec(checkoutArgs...)
 
 				if err != nil {
+					// Possible errors:
+					// 1. Branch already exists
 					cmd.Println("Error doing git checkout operation")
 					cmd.Println(err)
 					os.Stdout.Write(checkoutOutput)
-					// TODO: Return actual error
-					return nil
+					return fmt.Errorf("error checking out branch '%s': %v", teamBranch, err)
 				}
-
-				cmd.Println("git checkout -b output")
-				os.Stdout.Write(checkoutOutput)
 
 				// Stage files for this team
 				addOutput, err := opts.GitExec(append([]string{"add"}, files...)...)
 
 				if err != nil {
+					// Possible errors:
+					// 1.
 					cmd.Println("Error doing git add operation")
 					cmd.Println(err)
 					os.Stdout.Write(addOutput)
-					// TODO: Return actual error
-					return nil
+					return fmt.Errorf("problem adding files")
 				}
 
-				cmd.Println("git add")
-				os.Stdout.Write(addOutput)
-
-				teamCommitMessage, err := formatString(opts.Prompter, commitMessageTemplate, fmtOptions)
+				teamCommit, err := executeToString(commitTemplate, templateData)
 
 				if err != nil {
-					return fmt.Errorf("error while formatting commit message template: %v", err)
+					return fmt.Errorf("error while getting commit message template: %v", err)
 				}
 
 				// Create commit
-				commitArgs := []string{"commit", "--message", teamCommitMessage}
+				commitArgs := []string{"commit", "--message", teamCommit}
 
 				commitOutput, err := opts.GitExec(commitArgs...)
 
 				if err != nil {
+					// Possible errors:
+					// 1.
 					cmd.Println("Error doing git commit operation")
 					cmd.Println(err)
 					os.Stderr.Write(commitOutput)
-					// TODO: Return actual error
-					return nil
+					return fmt.Errorf("problem committing code for team '%s': %v", team, err)
 				}
 
 				cmd.Println("git commit")
@@ -287,19 +220,17 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				// Push branch
 				pushArgs := []string{"push", "--set-upstream", remoteName, teamBranch}
 
-				// TODO: Currently if the branch exists on remote this fails, show better error or avoid the error in the first place?
 				pushOutput, err := opts.GitExec(pushArgs...)
 
 				if err != nil {
+					// Possible errors:
+					// 1. Branch already exists in the remote
 					cmd.Println("Error doing git push operation")
 					cmd.Println(err)
 					os.Stderr.Write(pushOutput)
 					// TODO: Return actual error
 					return nil
 				}
-
-				cmd.Println("git push")
-				os.Stdout.Write(pushOutput)
 
 				// TODO: We could make this safer and remove unsafe path characters
 				file, err := os.CreateTemp(os.TempDir(), "team_pr_body")
@@ -313,28 +244,26 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 				defer file.Close()
 				defer os.Remove(file.Name())
 
-				newString, err := formatString(opts.Prompter, contents, fmtOptions)
+				teamBody, err := executeToString(bodyTemplate, templateData)
 
 				if err != nil {
 					return fmt.Errorf("error while formatting PR body: %v", err)
 				}
 
-				_, err = file.WriteString(newString)
+				_, err = file.WriteString(teamBody)
 
 				if err != nil {
-					cmd.Println(err)
-					// TODO: Return actual error
-					return nil
+					return fmt.Errorf("problem writing PR body file: %v", err)
 				}
 
-				// TODO: Take option for allowing it to create drafts or not
+				// TODO: We can support more args from `gh pr create`
 				args := []string{
 					"pr",
 					"new",
 					"--body-file",
 					file.Name(),
 					"--title",
-					teamCommitMessage,
+					teamCommit,
 					fmt.Sprintf("--draft=%t", autoPROpts.IsDraft),
 					fmt.Sprintf("--dry-run=%t", autoPROpts.DryRun),
 				}
@@ -416,93 +345,178 @@ LEARN MORE:
 	return cmd
 }
 
-type FormatOptions struct {
-	TeamSlug          string
-	NumberOfFiles     int
-	Files             string
-	TemplateVariables map[string]string
-}
+func getBranchTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
+	var templateString = ""
 
-func formatString(p Prompter, input string, options *FormatOptions) (output string, err error) {
-	// Do all reserved words first
-	output = strings.ReplaceAll(input, "{slug}", options.TeamSlug)
-	output = strings.ReplaceAll(output, "{numberOfFiles}", strconv.Itoa(options.NumberOfFiles))
-	output = strings.ReplaceAll(output, "{files}", options.Files)
-	output = strings.ReplaceAll(output, "{promote}", "Made with [`gh-codeowners`](https://github.com/justindbaur/gh-codeowners)")
+	if cmd.Flags().Changed("branch") {
+		templateString = autoPrOpts.BranchTemplate
+	} else {
+		var err error
+		templateString, err = rootOpts.Prompter.Input("What branch template do you want?", "")
 
-	// TODO: Can probably write this loop better
-	curIndex := 0
-	for {
-		if curIndex > len(output) {
-			break
+		if err != nil {
+			return nil, err
 		}
 
-		partial := output[curIndex:]
-		braceIndex := strings.Index(partial, "{")
-
-		if braceIndex == -1 {
-			// Nothing more to format
-			break
+		if templateString == "" {
+			return nil, fmt.Errorf("branch template is required")
 		}
-
-		endIndex := strings.Index(partial[braceIndex+1:], "}")
-
-		if endIndex == -1 {
-			// Not a valid formatted string, ignore it
-			curIndex = braceIndex
-			continue
-		}
-
-		innerText := partial[braceIndex+1 : braceIndex+1+endIndex]
-
-		existingValue, found := options.TemplateVariables[innerText]
-
-		if !found {
-			// We haven't seen this value yet, prompt for it and cache it
-			existingValue, err = p.Input(fmt.Sprintf("Enter a '%s' for team '%s'", innerText, options.TeamSlug), "")
-
-			if err != nil {
-				err = fmt.Errorf("error while prompting for '%s' for team '%s': %v", innerText, options.TeamSlug, err)
-				return
-			}
-
-			if existingValue == "" {
-				err = fmt.Errorf("input is required")
-				return
-			}
-
-			options.TemplateVariables[innerText] = existingValue
-		}
-
-		output = strings.ReplaceAll(output, fmt.Sprintf("{%s}", innerText), existingValue)
-		curIndex = braceIndex + endIndex + 2
 	}
 
-	return
+	parsedTemplate, err := template.New("Branch Template").Parse(templateString)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return parsedTemplate, nil
 }
 
+func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
+	var templateString = ""
+
+	if cmd.Flags().Changed("commit") {
+		templateString = autoPrOpts.CommitTemplate
+	} else {
+		var err error
+		templateString, err = rootOpts.Prompter.Input("What commit/PR title template do you want?", "Files for {{ .Team }}")
+
+		if err != nil {
+			return nil, err
+		}
+
+		if templateString == "" {
+			return nil, fmt.Errorf("commit template is required")
+		}
+	}
+
+	parsedTemplate, err := template.New("Commit Template").Parse(templateString)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return parsedTemplate, nil
+}
+
+func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
+	var initialPrContents = ""
+
+	if autoPrOpts.Template == "" {
+		topLevelDirBytes, err := rootOpts.GitExec("rev-parse", "--show-toplevel")
+
+		if err != nil {
+			return nil, fmt.Errorf("could not find top level dir: %v", err)
+		}
+
+		topLevelDir := strings.Trim(string(topLevelDirBytes), "\n")
+
+		const filePattern = "PULL_REQUEST_TEMPLATE"
+
+		// Get the top level dir another way
+		templates := githubtemplate.FindNonLegacy(topLevelDir, filePattern)
+
+		if legacyTemplate := githubtemplate.FindLegacy(topLevelDir, filePattern); legacyTemplate != "" {
+			templates = append(templates, legacyTemplate)
+		}
+
+		if len(templates) > 0 {
+			templateNames := make([]string, len(templates))
+
+			for i, templatePath := range templates {
+				templateNames[i] = githubtemplate.ExtractName(templatePath)
+			}
+
+			templateOption, err := rootOpts.Prompter.Select("Choose a template", templates[0], append(templateNames, "Start with a blank pull request"))
+			if err != nil {
+				return nil, fmt.Errorf("could not get PR template")
+			}
+
+			// Is this the last option that we insert for blank
+			if len(templates) != templateOption {
+				templateFile, err := rootOpts.ReadFile(templates[templateOption])
+
+				if err != nil {
+					return nil, fmt.Errorf("problem opening selected PR template: %v", err)
+				}
+
+				defer templateFile.Close()
+
+				builder := new(strings.Builder)
+				_, err = io.Copy(builder, templateFile.Reader)
+
+				if err != nil {
+					return nil, fmt.Errorf("error while reading PR template file contents: %v", err)
+				}
+
+				initialPrContents = builder.String()
+			}
+		}
+	} else {
+		templateFile, err := rootOpts.ReadFile(autoPrOpts.Template)
+
+		if err != nil {
+			return nil, fmt.Errorf("could not open the given template file '%s': %v", autoPrOpts.Template, err)
+		}
+
+		defer templateFile.Close()
+
+		builder := new(strings.Builder)
+		_, err = io.Copy(builder, templateFile.Reader)
+
+		if err != nil {
+			return nil, fmt.Errorf("error while reading PR template file contents: %v", err)
+		}
+
+		initialPrContents = builder.String()
+	}
+
+	var contents = ""
+	err := rootOpts.AskOne(initialPrContents, &contents)
+
+	if err != nil {
+		return nil, fmt.Errorf("error while requesting PR template edit: %v", err)
+	}
+
+	bodyTemplate, err := template.New("Body Template").Parse(contents)
+
+	if err != nil {
+		return nil, fmt.Errorf("parsing body template: %v", err)
+	}
+
+	return bodyTemplate, nil
+}
+
+func executeToString(template *template.Template, data *TemplateData) (string, error) {
+	buf := new(bytes.Buffer)
+	err := template.Execute(buf, data)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
 
 func findPrefixLength(values []string) int {
 	var longestPrefix = 0
 	var endPrefix = false
 
-    if len(values) > 0 {
-    	sort.Strings(values)
-    	first := values[0]
-    	last := values[len(values)-1]
+	if len(values) > 0 {
+		sort.Strings(values)
+		first := values[0]
+		last := values[len(values)-1]
 
-    	for i := 0; i < len(first); i++ {
-    		if !endPrefix && last[i] == first[i] {
-    			longestPrefix++
-    		} else {
-    			endPrefix = true
-    		}
-    	}
-    }
+		for i := 0; i < len(first); i++ {
+			if !endPrefix && last[i] == first[i] {
+				longestPrefix++
+			} else {
+				endPrefix = true
+			}
+		}
+	}
 
 	return longestPrefix
 }
-
 
 func reverse(s string) string {
 	n := len(s)
@@ -524,15 +538,55 @@ func reverseStrings(values []string) []string {
 	return output
 }
 
-
 func buildShortNames(teams []string) map[string]string {
+	if len(teams) < 2 {
+		panic("buildShortNames should not be called with fewer than 2 names")
+	}
+
 	prefixLength := findPrefixLength(teams)
 	suffixLength := findPrefixLength(reverseStrings(teams))
 
 	output := map[string]string{}
 	for _, team := range teams {
-		output[team] = team[prefixLength:len(team)+1-suffixLength]
+		if suffixLength == 0 {
+			output[team] = team[prefixLength:]
+		} else {
+			output[team] = team[prefixLength : len(team)-suffixLength]
+		}
 	}
 
 	return output
+}
+
+type TemplateData struct {
+	Number     int
+	Name       string
+	TeamId     string
+	Files      []string
+	Promote    string
+	prompter   Prompter
+	inputCache map[string]string
+}
+
+const promotionString = "Made by [`gh-codeowners`](https://github.com/justindbaur/gh-codeowners)"
+
+func (d *TemplateData) Input(name string) (string, error) {
+	existingValue, found := d.inputCache[name]
+
+	if !found {
+		val, err := d.prompter.Input(fmt.Sprintf("%s: %s", d.Name, name), "")
+
+		if err != nil {
+			return "", fmt.Errorf("problem while prompting team '%s' for name '%s'", d.Name, name)
+		}
+
+		if val == "" {
+			return "", fmt.Errorf("value not supplied for name '%s' for team '%s'", name, d.Name)
+		}
+
+		d.inputCache[name] = val
+		return val, nil
+	}
+
+	return existingValue, nil
 }
