@@ -228,7 +228,7 @@ each team.'`,
 				if err != nil {
 					// Possible errors:
 					// 1. Branch already exists in the remote
-					cmd.Println("Error doing git push operation")
+					cmd.Printf("Error doing git push operation: %v\n", pushArgs)
 					cmd.Println(err)
 					cmd.ErrOrStderr().Write(pushOutput)
 					return fmt.Errorf("problem pushing to remote")
@@ -267,12 +267,10 @@ each team.'`,
 					fmt.Sprintf("--dry-run=%t", autoPROpts.DryRun),
 				}
 
-				cmd.Println(args)
-
 				stdOut, stdErr, err := opts.GhExec(args...)
 
 				if err != nil {
-					cmd.Println("Problem creating PR with gh CLI")
+					cmd.Printf("Problem creating PR with gh CLI: %v\n", args)
 					cmd.OutOrStdout().Write(stdOut.Bytes())
 					cmd.ErrOrStderr().Write(stdErr.Bytes())
 					return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
