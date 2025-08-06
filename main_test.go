@@ -144,7 +144,7 @@ func TestMainCoreAutoPR(t *testing.T) {
 	testOpts := newTestRootOpts()
 
 	testOpts.Prompter.On("Input", "What branch template do you want?", "").Return("branch-{{ .Input \"Safe Name\"}}", nil)
-	testOpts.Prompter.On("Input", "What commit/PR title template do you want?", "Files for {{ .Team }}").Return("Do work for {{ .Input \"Safe Name\" }}", nil)
+	testOpts.Prompter.On("Input", "What commit/PR title template do you want?", "Files for {{ .TeamId }}").Return("Do work for {{ .Input \"Safe Name\" }}", nil)
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
 	testOpts.mockTemplateHole("1", "Safe Name", "one")
 	testOpts.mockTemplateHole("2", "Safe Name", "two")
@@ -210,7 +210,7 @@ func TestMainCoreAutoPR_withArgsMakesTwoPRS(t *testing.T) {
 	opts.mockTemplateHole("@team-1", "Team Name", "one")
 	opts.mockTemplateHole("@team-2", "Team Name", "two")
 
-	err := mainCore(opts.toActual(), []string{"auto-pr", "--draft", "--commit", "commit-{Team Name}", "--branch", "branch/{Team Name}"})
+	err := mainCore(opts.toActual(), []string{"auto-pr", "--draft", "--commit", "commit-{{ .Name }}", "--branch", "branch/{{ .Name }}"})
 
 	opts.Mock.AssertNumberOfCalls(t, "GhExec", 2)
 

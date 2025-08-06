@@ -183,10 +183,10 @@ each team.'`,
 
 				if err != nil {
 					// Possible errors:
-					// 1. Branch already exists
+					// 1. fatal: a branch named 'test' already exists
+					//   exit code: 128
 					cmd.Println("Error doing git checkout operation")
-					cmd.Println(err)
-					os.Stdout.Write(checkoutOutput)
+					cmd.ErrOrStderr().Write(checkoutOutput)
 					return fmt.Errorf("error checking out branch '%s': %v", teamBranch, err)
 				}
 
@@ -197,9 +197,8 @@ each team.'`,
 					// Possible errors:
 					// 1.
 					cmd.Println("Error doing git add operation")
-					cmd.Println(err)
-					os.Stdout.Write(addOutput)
-					return fmt.Errorf("problem adding files")
+					cmd.ErrOrStderr().Write(addOutput)
+					return fmt.Errorf("problem adding files: %v", err)
 				}
 
 				teamCommit, err := executeToString(commitTemplate, templateData)
@@ -217,13 +216,9 @@ each team.'`,
 					// Possible errors:
 					// 1.
 					cmd.Println("Error doing git commit operation")
-					cmd.Println(err)
-					os.Stderr.Write(commitOutput)
+					cmd.ErrOrStderr().Write(commitOutput)
 					return fmt.Errorf("problem committing code for team '%s': %v", team, err)
 				}
-
-				cmd.Println("git commit")
-				os.Stdout.Write(commitOutput)
 
 				// Push branch
 				pushArgs := []string{"push", "--set-upstream", remoteName, teamBranch}
@@ -233,20 +228,16 @@ each team.'`,
 				if err != nil {
 					// Possible errors:
 					// 1. Branch already exists in the remote
-					cmd.Println("Error doing git push operation")
+					cmd.Printf("Error doing git push operation: %v\n", pushArgs)
 					cmd.Println(err)
-					os.Stderr.Write(pushOutput)
-					// TODO: Return actual error
-					return nil
+					cmd.ErrOrStderr().Write(pushOutput)
+					return fmt.Errorf("problem pushing to remote")
 				}
 
-				// TODO: We could make this safer and remove unsafe path characters
 				file, err := os.CreateTemp(os.TempDir(), "team_pr_body")
 
 				if err != nil {
-					cmd.Println(err)
-					// TODO: Return actual error
-					return nil
+					return fmt.Errorf("problem creating temp dir: %v", err)
 				}
 
 				defer file.Close()
@@ -276,27 +267,26 @@ each team.'`,
 					fmt.Sprintf("--dry-run=%t", autoPROpts.DryRun),
 				}
 
-				cmd.Println(args)
-
 				stdOut, stdErr, err := opts.GhExec(args...)
 
 				if err != nil {
+					cmd.Printf("Problem creating PR with gh CLI: %v\n", args)
+					cmd.OutOrStdout().Write(stdOut.Bytes())
+					cmd.ErrOrStderr().Write(stdErr.Bytes())
 					return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
 				}
 
-				// Should we do anything else here?
-				os.Stdout.Write(stdOut.Bytes())
-				os.Stderr.Write(stdErr.Bytes())
+				// Stdout should be a url to the PR
+				cmd.Printf("PR for %s: %s", team, stdOut.String())
 
 				// Checkout back to the last branch so we can continue with new teams or leave the user back where they were
 				checkoutOutput, err = opts.GitExec("checkout", "-")
 
 				if err != nil {
+					cmd.Println("Could not checkout last branch")
+					cmd.ErrOrStderr().Write(checkoutOutput)
 					return fmt.Errorf("error trying to checkout base branch: %v", err)
 				}
-
-				os.Stdout.Write(checkoutOutput)
-				cmd.Printf("Finished making PR for %s\n", team)
 			}
 
 			return nil
@@ -353,7 +343,7 @@ func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts 
 		templateString = autoPrOpts.CommitTemplate
 	} else {
 		var err error
-		templateString, err = rootOpts.Prompter.Input("What commit/PR title template do you want?", "Files for {{ .Team }}")
+		templateString, err = rootOpts.Prompter.Input("What commit/PR title template do you want?", "Files for {{ .TeamId }}")
 
 		if err != nil {
 			return nil, err
