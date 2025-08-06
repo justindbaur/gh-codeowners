@@ -237,6 +237,36 @@ func TestMainCoreAutoPR_helpLong(t *testing.T) {
 	assert.NotEmpty(t, helpOutput)
 }
 
+func TestMainCoreAudit(t *testing.T) {
+	testOpts := newTestRootOpts()
+
+	testOpts.mockCodeowners([]string{
+		"dir @team-name",
+		"other-dir @team-2",
+	})
+
+	testOpts.Mock.On("GhExec", []string{
+		"api",
+		"/orgs/justindbaur/teams/team-name/members",
+	}).Return(*bytes.NewBufferString(`[{"login": "user-1", "type": "User"},{"login": "user-2", "type": "User"}]`), *bytes.NewBufferString(""), nil)
+
+	testOpts.Mock.On("GhExec", []string{
+		"pr",
+		"list",
+		"--json",
+		"author,number,reviewRequests,files",
+		"--limit",
+		"50",
+	}).Return(*bytes.NewBufferString(`[{"author":{"login":"another-user"},"files":[{"path": "dir/test.txt"}],"number":1,"reviewRequests":[]}]`), *bytes.NewBufferString(""), nil)
+
+	err := mainCore(testOpts.toActual(), []string{
+		"audit",
+		"team-name",
+	})
+
+	assert.NoError(t, err)
+}
+
 func setupAutoPRTest(codeownersFile string, workingTree string) *TestRootCmdOptions {
 	testOpts := newTestRootOpts()
 

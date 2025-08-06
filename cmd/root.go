@@ -46,6 +46,7 @@ func NewCmdRoot(opts *RootCmdOptions) *cobra.Command {
 	rootCmd.AddCommand(newCmdReport(opts))
 	rootCmd.AddCommand(newCmdStage(opts))
 	rootCmd.AddCommand(newCmdAutoPR(opts))
+	rootCmd.AddCommand(newCmdAudit(opts))
 
 	return rootCmd
 }

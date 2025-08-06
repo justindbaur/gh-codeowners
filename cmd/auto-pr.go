@@ -91,17 +91,9 @@ each team.'`,
 					return fmt.Errorf("error requesting what to do with unowned files: %v", err)
 				}
 
-				option := options[optionIndex]
-
-				existingValue, found := filesMap[option]
-
-				if found {
-					// Append
-					filesMap[option] = append(existingValue, unownedFiles...)
-				} else {
-					// Insert
-					filesMap[option] = unownedFiles
-				}
+				AddOrUpdate(filesMap, options[optionIndex], unownedFiles, func(files []string) []string {
+					return append(files, unownedFiles...)
+				})
 			}
 
 			if len(filesMap) == 0 {

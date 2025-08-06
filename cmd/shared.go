@@ -39,3 +39,12 @@ func GetEdittedFilesScanner(cmd *cobra.Command, opts *RootCmdOptions) (*bufio.Sc
 
 	return bufio.NewScanner(bytes.NewReader(diffOutput)), nil
 }
+
+func AddOrUpdate[K comparable, E any](m map[K]E, key K, initialValue E, updater func(existingValue E) E) {
+	existingValue, found := m[key]
+	if found {
+		m[key] = updater(existingValue)
+	} else {
+		m[key] = initialValue
+	}
+}

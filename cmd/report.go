@@ -32,25 +32,16 @@ func newCmdReport(opts *RootCmdOptions) *cobra.Command {
 			for edittedFilesScanner.Scan() {
 				owners := codeowners.FindOwners(edittedFilesScanner.Bytes())
 				if len(owners) == 1 {
-					owner := owners[0]
-					existingValue, found := singleOwnerReport[owner]
-
-					if found {
-						singleOwnerReport[owner] = existingValue + 1
-					} else {
-						singleOwnerReport[owner] = 1
-					}
+					AddOrUpdate(singleOwnerReport, owners[0], 1, func(existing int) int {
+						return existing + 1
+					})
 				} else if len(owners) > 1 {
 					cmd.Printf("File '%s' is owned by multiple teams %s\n", edittedFilesScanner.Text(), strings.Join(owners, ", "))
 				} else {
 					// TODO: Could do something about unowned files here
-					existingValue, found := singleOwnerReport[""]
-
-					if found {
-						singleOwnerReport[""] = existingValue + 1
-					} else {
-						singleOwnerReport[""] = 1
-					}
+					AddOrUpdate(singleOwnerReport, "", 1, func(existing int) int {
+						return existing + 1
+					})
 				}
 			}
 
