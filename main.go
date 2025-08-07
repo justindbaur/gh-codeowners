@@ -89,7 +89,7 @@ func main() {
 			}
 
 			if len(validRemotes) == 1 {
-				return validRemotes[1], nil
+				return validRemotes[0], nil
 			}
 
 			index, err := p.Select("What remote would you like to make PR's on?", validRemotes[0], validRemotes)
