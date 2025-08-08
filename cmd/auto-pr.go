@@ -84,7 +84,7 @@ each team.'`,
 
 			if len(unownedFiles) > 0 {
 				// Let the user choose where to put unowned files
-				options := append(slices.Collect(maps.Keys(filesMap)), "Separate")
+				options := append(slices.Collect(maps.Keys(filesMap)), "Separate", "Choose for each")
 				optionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %d unowned files", len(unownedFiles)), "", options)
 
 				if err != nil {
@@ -93,14 +93,38 @@ each team.'`,
 
 				option := options[optionIndex]
 
-				existingValue, found := filesMap[option]
+				if option == "Choose for each" {
+					eachOptions := append(slices.Collect(maps.Keys(filesMap)), "Separate")
+					for _, unownedFile := range unownedFiles {
+						eachOptionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %s", unownedFile), "", eachOptions)
 
-				if found {
-					// Append
-					filesMap[option] = append(existingValue, unownedFiles...)
+						if err != nil {
+							return fmt.Errorf("issue getting PR to put %s: %v", unownedFile, err)
+						}
+
+						eachOption := eachOptions[eachOptionIndex]
+
+						existingValue, found := filesMap[eachOption]
+
+						// TODO: Use AddOrUpdate when merged
+						if found {
+							// Append
+							filesMap[eachOption] = append(existingValue, unownedFile)
+						} else {
+							// Insert
+							filesMap[eachOption] = []string{unownedFile}
+						}
+					}
 				} else {
-					// Insert
-					filesMap[option] = unownedFiles
+					existingValue, found := filesMap[option]
+
+					if found {
+						// Append
+						filesMap[option] = append(existingValue, unownedFiles...)
+					} else {
+						// Insert
+						filesMap[option] = unownedFiles
+					}
 				}
 			}
 
@@ -137,6 +161,7 @@ each team.'`,
 				return fmt.Errorf("could not determine remote name: %v", err)
 			}
 
+			// TODO: Possibly remove "Separate" from the PR's to make short names from
 			shortNames := buildShortNames(slices.Collect(maps.Keys(filesMap)))
 
 			var number = 1
