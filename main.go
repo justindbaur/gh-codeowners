@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -16,6 +17,18 @@ import (
 
 	"github.com/justindbaur/gh-codeowners/cmd"
 )
+
+type RealFile struct {
+	*os.File
+}
+
+func (file *RealFile) Reader() io.Reader {
+	return file
+}
+
+func (file *RealFile) Close() error {
+	return file.Close()
+}
 
 var remoteRE = regexp.MustCompile(`(.+)\s+(.+)\s+\((push|fetch)\)`)
 
@@ -36,6 +49,15 @@ func main() {
 		GitExec: func(arg ...string) ([]byte, error) {
 			return exec.Command(gitBin, arg...).Output()
 		},
+		GitExecInt: func(arg ...string) error {
+			gitCmd := exec.Command(gitBin, arg...)
+
+			gitCmd.Stdin = os.Stdin
+			gitCmd.Stdout = os.Stdout
+			gitCmd.Stderr = os.Stderr
+
+			return gitCmd.Run()
+		},
 		GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
 			return gh.Exec(arg...)
 		},
@@ -50,19 +72,14 @@ func main() {
 			}
 			return survey.AskOne(prompt, contents)
 		},
-		ReadFile: func(filePath string) (file *cmd.File, err error) {
+		ReadFile: func(filePath string) (file cmd.File, err error) {
 			actualFile, err := os.Open(filePath)
 
 			if err != nil {
 				return
 			}
 
-			return &cmd.File{
-				Reader: actualFile,
-				Close: func() error {
-					return actualFile.Close()
-				},
-			}, nil
+			return &RealFile{actualFile}, nil
 		},
 		GetRemoteName: func() (string, error) {
 			remoteOutput, err := exec.Command(gitBin, "remote", "-v").Output()

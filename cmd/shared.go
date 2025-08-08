@@ -23,7 +23,7 @@ func GetCodeowners(cmd *cobra.Command, opts *RootCmdOptions) (*codeowners.Codeow
 
 		defer file.Close()
 
-		return codeowners.FromReader(file.Reader)
+		return codeowners.FromReader(file.Reader())
 	}
 
 	return nil, fmt.Errorf("could not locate a CODEOWNERS file")

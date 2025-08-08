@@ -15,15 +15,144 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type PullRequestPlan struct {
+	// A map of team name to the files that should go into their PR
+	TeamFiles map[string][]string
+	// Files that don't have an owner
+	UnownedFiles []string
+	// A slice of files that should be put into their own PR
+	SeparateFiles []string
+	// A map of team name to files that should go through interactive staging
+	InteractiveStageFiles map[string][]string
+}
+
+func (plan *PullRequestPlan) PlanForFile(file string, owners []string) {
+	if len(owners) == 0 {
+		plan.UnownedFiles = append(plan.UnownedFiles, file)
+		return
+	}
+
+	// TODO: Could apply different algothims to spread load
+	// For now attempt to minimize PR's by scanning if any of the owners already have an entry and if they do add it to the first one
+	var foundEntry = false
+	for _, owner := range owners {
+		existingValue, found := plan.TeamFiles[owner]
+		if found {
+			// Update
+			foundEntry = true
+			plan.TeamFiles[owner] = append(existingValue, file)
+		}
+	}
+
+	if !foundEntry {
+		// Insert it for the first owner
+		plan.TeamFiles[owners[0]] = []string{file}
+	}
+}
+
+func (plan *PullRequestPlan) HasUnownedFiles() bool {
+	return len(plan.UnownedFiles) > 0
+}
+
+func (plan *PullRequestPlan) MoveUnownedFiles(opts *RootCmdOptions) error {
+	teamNames := slices.Collect(maps.Keys(plan.TeamFiles))
+	generalOptions := append(teamNames, "Separate", "Choose for each")
+	generalOptionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %d unowned files", len(plan.UnownedFiles)), "", generalOptions)
+
+	if err != nil {
+		return err
+	}
+
+	generalOption := generalOptions[generalOptionIndex]
+
+	// TODO: Do we need to handle empty string?
+
+	switch generalOption {
+	case "Choose for each":
+		// TODO: Could allow them to view the file and if they choose that option show the options again after showing a diff
+		specificOptions := append(teamNames, "Separate")
+
+		for _, unownedFile := range plan.UnownedFiles {
+			// Prompt for each file
+			selectedOptions, err := opts.Prompter.MultiSelect(fmt.Sprintf("What teams should '%s' be put into (can select multiple)", unownedFile), []string{}, specificOptions)
+
+			if err != nil {
+				return err
+			}
+
+			numberOfOptionsSelected := len(selectedOptions)
+
+			if numberOfOptionsSelected == 0 {
+				return fmt.Errorf("must select at least one action")
+			}
+
+			// Did they select a team AND separate?
+			if numberOfOptionsSelected > 1 && slices.Contains(selectedOptions, len(teamNames)) {
+				return fmt.Errorf("cannot select Separate alongside a team")
+			}
+
+			if numberOfOptionsSelected == 1 {
+				// Did they select Separate
+				if selectedOptions[0] == len(teamNames) {
+					plan.SeparateFiles = append(plan.SeparateFiles, unownedFile)
+				} else {
+					// Add to the selected team
+					selectedTeam := teamNames[selectedOptions[0]]
+					plan.TeamFiles[selectedTeam] = append(plan.TeamFiles[selectedTeam], unownedFile)
+				}
+			}
+
+			for _, selectedIndex := range selectedOptions {
+				// All these should be a team name
+				selectedTeam := teamNames[selectedIndex]
+
+				existingValue, found := plan.InteractiveStageFiles[selectedTeam]
+				if found {
+					plan.InteractiveStageFiles[selectedTeam] = append(existingValue, unownedFile)
+				} else {
+					plan.InteractiveStageFiles[selectedTeam] = []string{unownedFile}
+				}
+			}
+		}
+	case "Separate":
+		// Copy unowned files to the seperate files list
+		plan.SeparateFiles = plan.UnownedFiles
+	default:
+		// An entry for this HAS to exist in the map, so append to it
+		plan.TeamFiles[generalOption] = append(plan.TeamFiles[generalOption], plan.UnownedFiles...)
+	}
+
+	return nil
+}
+
+func (plan *PullRequestPlan) DoInteractiveStagingIfNeeded(team string, opts *RootCmdOptions) error {
+	filesToStage, found := plan.InteractiveStageFiles[team]
+
+	if !found {
+		// No files need to be interactively staged for this team, skip
+		return nil
+	}
+
+	return opts.GitExecInt(append([]string{"add", "--interactive"}, filesToStage...)...)
+}
+
+func NewPullRequestPlan() *PullRequestPlan {
+	return &PullRequestPlan{
+		TeamFiles:             map[string][]string{},
+		UnownedFiles:          []string{},
+		SeparateFiles:         []string{},
+		InteractiveStageFiles: map[string][]string{},
+	}
+}
+
 type AutoPROptions struct {
 	IsDraft        bool
 	CommitTemplate string
 	BranchTemplate string
-	// TODO: Allow body in non-interactive way
-
-	UnownedFiles string
-	DryRun       bool
-	Template     string
+	RemoteName     string
+	BodyTemplate   string
+	UnownedFiles   string
+	DryRun         bool
 }
 
 func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
@@ -53,116 +182,60 @@ each team.'`,
 				return fmt.Errorf("error getting codeowners info: %v", err)
 			}
 
-			filesMap := map[string][]string{}
-			unownedFiles := []string{}
+			prPlan := NewPullRequestPlan()
 
 			for edittedFilesScanner.Scan() {
 				owners := codeowners.FindOwners(edittedFilesScanner.Bytes())
-
-				if len(owners) == 0 {
-					unownedFiles = append(unownedFiles, edittedFilesScanner.Text())
-					continue
-				}
-
-				// TODO: Could apply different algothims to spread load
-				// For now attempt to minimize PR's by scanning if any of the owners already have an entry and if they do add it to the first one
-				var foundEntry = false
-				for _, owner := range owners {
-					existingValue, found := filesMap[owner]
-					if found {
-						// Update
-						foundEntry = true
-						filesMap[owner] = append(existingValue, edittedFilesScanner.Text())
-					}
-				}
-
-				if !foundEntry {
-					// Insert it for the first owner
-					filesMap[owners[0]] = []string{edittedFilesScanner.Text()}
-				}
+				prPlan.PlanForFile(edittedFilesScanner.Text(), owners)
 			}
 
-			if len(unownedFiles) > 0 {
-				// Let the user choose where to put unowned files
-				options := append(slices.Collect(maps.Keys(filesMap)), "Separate", "Choose for each")
-				optionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %d unowned files", len(unownedFiles)), "", options)
+			if prPlan.HasUnownedFiles() {
+				err = prPlan.MoveUnownedFiles(opts)
 
 				if err != nil {
-					return fmt.Errorf("error requesting what to do with unowned files: %v", err)
-				}
-
-				option := options[optionIndex]
-
-				if option == "Choose for each" {
-					eachOptions := append(slices.Collect(maps.Keys(filesMap)), "Separate")
-					for _, unownedFile := range unownedFiles {
-						eachOptionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %s", unownedFile), "", eachOptions)
-
-						if err != nil {
-							return fmt.Errorf("issue getting PR to put %s: %v", unownedFile, err)
-						}
-
-						eachOption := eachOptions[eachOptionIndex]
-
-						existingValue, found := filesMap[eachOption]
-
-						// TODO: Use AddOrUpdate when merged
-						if found {
-							// Append
-							filesMap[eachOption] = append(existingValue, unownedFile)
-						} else {
-							// Insert
-							filesMap[eachOption] = []string{unownedFile}
-						}
-					}
-				} else {
-					existingValue, found := filesMap[option]
-
-					if found {
-						// Append
-						filesMap[option] = append(existingValue, unownedFiles...)
-					} else {
-						// Insert
-						filesMap[option] = unownedFiles
-					}
+					return fmt.Errorf("issue moving unowned files: %v", err)
 				}
 			}
 
-			if len(filesMap) == 0 {
+			if len(prPlan.TeamFiles) == 0 {
 				// Nothing to do, stop here
 				return fmt.Errorf("there are no files to make PR's for")
 			}
 
-			if len(filesMap) == 1 {
+			if len(prPlan.TeamFiles) == 1 {
 				return fmt.Errorf("only one PR would be made, it's recommended to just use `gh pr create`")
 			}
 
-			branchTemplate, err := getBranchTemplate(cmd, opts, autoPROpts)
+			err = getBranchTemplate(cmd, opts, autoPROpts)
 
 			if err != nil {
 				return fmt.Errorf("problem getting branch template: %v", err)
 			}
 
-			commitTemplate, err := getCommitTemplate(cmd, opts, autoPROpts)
+			err = getCommitTemplate(cmd, opts, autoPROpts)
 
 			if err != nil {
 				return fmt.Errorf("error getting commit template: %v", err)
 			}
 
-			bodyTemplate, err := getBodyTemplate(cmd, opts, autoPROpts)
+			err = getBodyTemplate(cmd, opts, autoPROpts)
 
 			if err != nil {
 				return fmt.Errorf("error getting body template: %v", err)
 			}
 
-			remoteName, err := opts.GetRemoteName()
+			if !cmd.Flags().Changed("remote") {
+				remoteName, err := opts.GetRemoteName()
 
-			if err != nil {
-				return fmt.Errorf("could not determine remote name: %v", err)
+				if err != nil {
+					return fmt.Errorf("could not determine remote name: %v", err)
+				}
+
+				autoPROpts.RemoteName = remoteName
 			}
 
 			// TODO: Possibly remove "Separate" from the PR's to make short names from
-			shortNames := buildShortNames(slices.Collect(maps.Keys(filesMap)))
+			shortNames := buildShortNames(slices.Collect(maps.Keys(prPlan.TeamFiles)))
 
 			var number = 1
 
@@ -170,8 +243,8 @@ each team.'`,
 			checkedOutBranches := []string{}
 
 			// TODO: Do this loop with some sort that makes it do it the same way each time
-			for team, files := range filesMap {
-				templateData := &TemplateData{
+			for team, files := range prPlan.TeamFiles {
+				err = createPullRequest(cmd, &checkedOutBranches, autoPROpts, opts, &TemplateData{
 					Number:     number,
 					TeamId:     team,
 					Name:       shortNames[team],
@@ -179,138 +252,33 @@ each team.'`,
 					Promote:    promotionString,
 					prompter:   opts.Prompter,
 					inputCache: map[string]string{},
+				}, func(t string) error {
+					return prPlan.DoInteractiveStagingIfNeeded(t, opts)
+				})
+
+				if err != nil {
+					return fmt.Errorf("issue creating PR for team %s: %v", team, err)
 				}
+
 				number++
+			}
 
-				cmd.Printf("Creating PR for team: %s\n", team)
-
-				teamBranch, err := executeToString(branchTemplate, templateData)
-
-				if err != nil {
-					return fmt.Errorf("error while formatting branch template: %v", err)
-				}
-
-				if slices.Contains(checkedOutBranches, teamBranch) {
-					cmd.Printf("Branch '%s' is not unique, adding incrementing number to the branch name\n", teamBranch)
-					// Their branch name is NOT unique, re-execute with the number thrown onto the end
-					// Technically... this branch could not be unique still but I think they are just messing with me if that's
-					// the case.
-					teamBranch = fmt.Sprintf("%s-%d", teamBranch, templateData.Number)
-				}
-
-				// Track branch
-				checkedOutBranches = append(checkedOutBranches, teamBranch)
-
-				checkoutArgs := []string{"checkout", "-b", teamBranch}
-
-				// Checkout
-				checkoutOutput, err := opts.GitExec(checkoutArgs...)
+			if len(prPlan.SeparateFiles) > 0 {
+				err = createPullRequest(cmd, &checkedOutBranches, autoPROpts, opts, &TemplateData{
+					Number:     number,
+					Name:       "Separate",
+					TeamId:     "Separate Pull Request",
+					Files:      prPlan.SeparateFiles,
+					prompter:   opts.Prompter,
+					inputCache: map[string]string{},
+					Promote:    promotionString,
+				}, func(team string) error {
+					// Separate PR will never do interactive staging
+					return nil
+				})
 
 				if err != nil {
-					// Possible errors:
-					// 1. fatal: a branch named 'test' already exists
-					//   exit code: 128
-					cmd.Println("Error doing git checkout operation")
-					cmd.ErrOrStderr().Write(checkoutOutput)
-					return fmt.Errorf("error checking out branch '%s': %v", teamBranch, err)
-				}
-
-				// Stage files for this team
-				addOutput, err := opts.GitExec(append([]string{"add"}, files...)...)
-
-				if err != nil {
-					// Possible errors:
-					// 1.
-					cmd.Println("Error doing git add operation")
-					cmd.ErrOrStderr().Write(addOutput)
-					return fmt.Errorf("problem adding files: %v", err)
-				}
-
-				teamCommit, err := executeToString(commitTemplate, templateData)
-
-				if err != nil {
-					return fmt.Errorf("error while getting commit message template: %v", err)
-				}
-
-				// Create commit
-				commitArgs := []string{"commit", "--message", teamCommit}
-
-				commitOutput, err := opts.GitExec(commitArgs...)
-
-				if err != nil {
-					// Possible errors:
-					// 1.
-					cmd.Println("Error doing git commit operation")
-					cmd.ErrOrStderr().Write(commitOutput)
-					return fmt.Errorf("problem committing code for team '%s': %v", team, err)
-				}
-
-				// Push branch
-				pushArgs := []string{"push", "--set-upstream", remoteName, teamBranch}
-
-				pushOutput, err := opts.GitExec(pushArgs...)
-
-				if err != nil {
-					// Possible errors:
-					// 1. Branch already exists in the remote
-					cmd.Printf("Error doing git push operation: %v\n", pushArgs)
-					cmd.Println(err)
-					cmd.ErrOrStderr().Write(pushOutput)
-					return fmt.Errorf("problem pushing to remote")
-				}
-
-				file, err := os.CreateTemp(os.TempDir(), "team_pr_body")
-
-				if err != nil {
-					return fmt.Errorf("problem creating temp dir: %v", err)
-				}
-
-				defer file.Close()
-				defer os.Remove(file.Name())
-
-				teamBody, err := executeToString(bodyTemplate, templateData)
-
-				if err != nil {
-					return fmt.Errorf("error while formatting PR body: %v", err)
-				}
-
-				_, err = file.WriteString(teamBody)
-
-				if err != nil {
-					return fmt.Errorf("problem writing PR body file: %v", err)
-				}
-
-				// TODO: We can support more args from `gh pr create`
-				args := []string{
-					"pr",
-					"new",
-					"--body-file",
-					file.Name(),
-					"--title",
-					teamCommit,
-					fmt.Sprintf("--draft=%t", autoPROpts.IsDraft),
-					fmt.Sprintf("--dry-run=%t", autoPROpts.DryRun),
-				}
-
-				stdOut, stdErr, err := opts.GhExec(args...)
-
-				if err != nil {
-					cmd.Printf("Problem creating PR with gh CLI: %v\n", args)
-					cmd.OutOrStdout().Write(stdOut.Bytes())
-					cmd.ErrOrStderr().Write(stdErr.Bytes())
-					return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
-				}
-
-				// Stdout should be a url to the PR
-				cmd.Printf("PR for %s: %s", team, stdOut.String())
-
-				// Checkout back to the last branch so we can continue with new teams or leave the user back where they were
-				checkoutOutput, err = opts.GitExec("checkout", "-")
-
-				if err != nil {
-					cmd.Println("Could not checkout last branch")
-					cmd.ErrOrStderr().Write(checkoutOutput)
-					return fmt.Errorf("error trying to checkout base branch: %v", err)
+					return fmt.Errorf("issue creating separate PR: %v", err)
 				}
 			}
 
@@ -324,7 +292,8 @@ each team.'`,
 	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "What PR to put unowned files onto. `separate` to make their own PR.")
 	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
-	fl.StringVarP(&autoPROpts.Template, "template", "T", "", "The template `file` to use when creating the templated team PR")
+	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "The template `file` to use when creating the templated team PR")
+	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "The remote the PR will be created on")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// TODO: Do early parse of CODEOWNERS file to help fill in option
@@ -334,68 +303,193 @@ each team.'`,
 	return cmd
 }
 
-func getBranchTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
-	var templateString = ""
+func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts *AutoPROptions, opts *RootCmdOptions, data *TemplateData, runInteractiveStaging func(team string) error) error {
+	cmd.Printf("Creating PR for team: %s\n", data.TeamId)
 
-	if cmd.Flags().Changed("branch") {
-		templateString = autoPrOpts.BranchTemplate
-	} else {
+	teamBranch, err := executeToString("Branch Template", prOpts.BranchTemplate, data)
+
+	if err != nil {
+		return fmt.Errorf("error while formatting branch template: %v", err)
+	}
+
+	if slices.Contains(*checkedOutBranches, teamBranch) {
+		cmd.Printf("Branch '%s' is not unique, adding incrementing number to the branch name\n", teamBranch)
+		// Their branch name is NOT unique, re-execute with the number thrown onto the end
+		// Technically... this branch could not be unique still but I think they are just messing with me if that's
+		// the case.
+		teamBranch = fmt.Sprintf("%s-%d", teamBranch, data.Number)
+	}
+
+	// Track branch
+	*checkedOutBranches = append(*checkedOutBranches, teamBranch)
+
+	checkoutArgs := []string{"checkout", "-b", teamBranch}
+
+	// Checkout
+	checkoutOutput, err := opts.GitExec(checkoutArgs...)
+
+	if err != nil {
+		// Possible errors:
+		// 1. fatal: a branch named 'test' already exists
+		//   exit code: 128
+		cmd.Println("Error doing git checkout operation")
+		cmd.ErrOrStderr().Write(checkoutOutput)
+		return fmt.Errorf("error checking out branch '%s': %v", teamBranch, err)
+	}
+
+	// Stage files for this team
+	addOutput, err := opts.GitExec(append([]string{"add"}, data.Files...)...)
+
+	if err != nil {
+		// Possible errors:
+		// 1.
+		cmd.Println("Error doing git add operation")
+		cmd.ErrOrStderr().Write(addOutput)
+		return fmt.Errorf("problem adding files: %v", err)
+	}
+
+	// Possibly do interactive staging
+	err = runInteractiveStaging(data.TeamId)
+
+	if err != nil {
+		return fmt.Errorf("issue doing interactive staging: %v", err)
+	}
+
+	teamCommit, err := executeToString("Commit Template", prOpts.CommitTemplate, data)
+
+	if err != nil {
+		return fmt.Errorf("error while getting commit message template: %v", err)
+	}
+
+	// Create commit
+	commitArgs := []string{"commit", "--message", teamCommit}
+
+	commitOutput, err := opts.GitExec(commitArgs...)
+
+	if err != nil {
+		// Possible errors:
+		// 1.
+		cmd.Println("Error doing git commit operation")
+		cmd.ErrOrStderr().Write(commitOutput)
+		return fmt.Errorf("problem committing code for team '%s': %v", data.TeamId, err)
+	}
+
+	// Push branch
+	pushArgs := []string{"push", "--set-upstream", prOpts.RemoteName, teamBranch}
+
+	pushOutput, err := opts.GitExec(pushArgs...)
+
+	if err != nil {
+		// Possible errors:
+		// 1. Branch already exists in the remote
+		cmd.Printf("Error doing git push operation: %v\n", pushArgs)
+		cmd.Println(err)
+		cmd.ErrOrStderr().Write(pushOutput)
+		return fmt.Errorf("problem pushing to remote")
+	}
+
+	file, err := os.CreateTemp(os.TempDir(), "team_pr_body")
+
+	if err != nil {
+		return fmt.Errorf("problem creating temp dir: %v", err)
+	}
+
+	defer file.Close()
+	defer os.Remove(file.Name())
+
+	teamBody, err := executeToString("Body Template", prOpts.BodyTemplate, data)
+
+	if err != nil {
+		return fmt.Errorf("error while formatting PR body: %v", err)
+	}
+
+	_, err = file.WriteString(teamBody)
+
+	if err != nil {
+		return fmt.Errorf("problem writing PR body file: %v", err)
+	}
+
+	// TODO: We can support more args from `gh pr create`
+	args := []string{
+		"pr",
+		"new",
+		"--body-file",
+		file.Name(),
+		"--title",
+		teamCommit,
+		fmt.Sprintf("--draft=%t", prOpts.IsDraft),
+		fmt.Sprintf("--dry-run=%t", prOpts.DryRun),
+	}
+
+	stdOut, stdErr, err := opts.GhExec(args...)
+
+	if err != nil {
+		cmd.Printf("Problem creating PR with gh CLI: %v\n", args)
+		cmd.OutOrStdout().Write(stdOut.Bytes())
+		cmd.ErrOrStderr().Write(stdErr.Bytes())
+		return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
+	}
+
+	// Stdout should be a url to the PR
+	cmd.Printf("PR for %s: %s", data.TeamId, stdOut.String())
+
+	// TODO: This doesn't work if interactive staging happened
+	// Checkout back to the last branch so we can continue with new teams or leave the user back where they were
+	checkoutOutput, err = opts.GitExec("checkout", "-")
+
+	if err != nil {
+		cmd.Println("Could not checkout last branch")
+		cmd.ErrOrStderr().Write(checkoutOutput)
+		return fmt.Errorf("error trying to checkout base branch: %v", err)
+	}
+
+	return nil
+}
+
+func getBranchTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) error {
+	if !cmd.Flags().Changed("branch") {
 		var err error
-		templateString, err = rootOpts.Prompter.Input("What branch template do you want?", "")
+		templateString, err := rootOpts.Prompter.Input("What branch template do you want?", "")
 
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if templateString == "" {
-			return nil, fmt.Errorf("branch template is required")
+			return fmt.Errorf("branch template is required")
 		}
+
+		autoPrOpts.BranchTemplate = templateString
 	}
 
-	parsedTemplate, err := template.New("Branch Template").Parse(templateString)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return parsedTemplate, nil
+	return nil
 }
 
-func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
-	var templateString = ""
-
-	if cmd.Flags().Changed("commit") {
-		templateString = autoPrOpts.CommitTemplate
-	} else {
-		var err error
-		templateString, err = rootOpts.Prompter.Input("What commit/PR title template do you want?", "Files for {{ .TeamId }}")
+func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) error {
+	if !cmd.Flags().Changed("commit") {
+		templateString, err := rootOpts.Prompter.Input("What commit/PR title template do you want?", "Files for {{ .TeamId }}")
 
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if templateString == "" {
-			return nil, fmt.Errorf("commit template is required")
+			return fmt.Errorf("commit template is required")
 		}
+
+		autoPrOpts.CommitTemplate = templateString
 	}
 
-	parsedTemplate, err := template.New("Commit Template").Parse(templateString)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return parsedTemplate, nil
+	return nil
 }
 
-func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) (*template.Template, error) {
-	var initialPrContents = ""
-
-	if autoPrOpts.Template == "" {
+func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) error {
+	if !cmd.Flags().Changed("body") {
+		// Get body and place on autoPrOpts
 		topLevelDirBytes, err := rootOpts.GitExec("rev-parse", "--show-toplevel")
 
 		if err != nil {
-			return nil, fmt.Errorf("could not find top level dir: %v", err)
+			return err
 		}
 
 		topLevelDir := strings.Trim(string(topLevelDirBytes), "\n")
@@ -418,7 +512,7 @@ func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *A
 
 			templateOption, err := rootOpts.Prompter.Select("Choose a template", templates[0], append(templateNames, "Start with a blank pull request"))
 			if err != nil {
-				return nil, fmt.Errorf("could not get PR template")
+				return err
 			}
 
 			// Is this the last option that we insert for blank
@@ -426,59 +520,35 @@ func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *A
 				templateFile, err := rootOpts.ReadFile(templates[templateOption])
 
 				if err != nil {
-					return nil, fmt.Errorf("problem opening selected PR template: %v", err)
+					return err
 				}
 
 				defer templateFile.Close()
 
 				builder := new(strings.Builder)
-				_, err = io.Copy(builder, templateFile.Reader)
+				_, err = io.Copy(builder, templateFile.Reader())
 
 				if err != nil {
-					return nil, fmt.Errorf("error while reading PR template file contents: %v", err)
+					return err
 				}
 
-				initialPrContents = builder.String()
+				autoPrOpts.BodyTemplate = builder.String()
 			}
 		}
-	} else {
-		templateFile, err := rootOpts.ReadFile(autoPrOpts.Template)
-
-		if err != nil {
-			return nil, fmt.Errorf("could not open the given template file '%s': %v", autoPrOpts.Template, err)
-		}
-
-		defer templateFile.Close()
-
-		builder := new(strings.Builder)
-		_, err = io.Copy(builder, templateFile.Reader)
-
-		if err != nil {
-			return nil, fmt.Errorf("error while reading PR template file contents: %v", err)
-		}
-
-		initialPrContents = builder.String()
 	}
 
-	var contents = ""
-	err := rootOpts.AskOne(initialPrContents, &contents)
-
-	if err != nil {
-		return nil, fmt.Errorf("error while requesting PR template edit: %v", err)
-	}
-
-	bodyTemplate, err := template.New("Body Template").Parse(contents)
-
-	if err != nil {
-		return nil, fmt.Errorf("parsing body template: %v", err)
-	}
-
-	return bodyTemplate, nil
+	return nil
 }
 
-func executeToString(template *template.Template, data *TemplateData) (string, error) {
+func executeToString(name, templateText string, data *TemplateData) (string, error) {
+	t, err := template.New(fmt.Sprintf("%s: %s", name, data.Name)).Parse(templateText)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to parse %s template for team %s", name, data.Name)
+	}
+
 	buf := new(bytes.Buffer)
-	err := template.Execute(buf, data)
+	err = t.Execute(buf, data)
 	if err != nil {
 		return "", err
 	}

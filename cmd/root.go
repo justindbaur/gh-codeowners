@@ -10,20 +10,22 @@ import (
 type Prompter interface {
 	Input(prompt, defaultValue string) (string, error)
 	Select(prompt, defaultValue string, options []string) (int, error)
+	MultiSelect(prompt string, defaultValues, options []string) ([]int, error)
 	Confirm(prompt string, defaultValue bool) (bool, error)
 }
 
-type File struct {
-	Reader io.Reader
-	Close  func() error
+type File interface {
+	Reader() io.Reader
+	Close() error
 }
 
 type RootCmdOptions struct {
 	In            io.Reader
 	Out           io.Writer
 	Err           io.Writer
-	ReadFile      func(filePath string) (*File, error)
+	ReadFile      func(filePath string) (File, error)
 	GitExec       func(arg ...string) ([]byte, error)
+	GitExecInt    func(arg ...string) error
 	GhExec        func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error)
 	Prompter      Prompter
 	AskOne        func(templateContents string, contents any) error

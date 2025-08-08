@@ -1,10 +1,45 @@
 package cmd
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/justindbaur/gh-codeowners/internal"
 	"github.com/stretchr/testify/assert"
 )
+
+func toActual(testOpts *internal.TestRootCmdOptions) *RootCmdOptions {
+	return &RootCmdOptions{
+		In:  testOpts.In,
+		Out: testOpts.Out,
+		Err: testOpts.Err,
+		ReadFile: func(filePath string) (File, error) {
+			args := testOpts.Mock.MethodCalled("ReadFile", filePath)
+			return args.Get(0).(File), args.Error(1)
+		},
+		GitExec: func(arg ...string) ([]byte, error) {
+			args := testOpts.Mock.MethodCalled("GitExec", arg)
+			return args.Get(0).([]byte), args.Error(1)
+		},
+		GitExecInt: func(arg ...string) error {
+			args := testOpts.Mock.MethodCalled("GitExecInt", arg)
+			return args.Error(0)
+		},
+		GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
+			args := testOpts.Mock.MethodCalled("GhExec", arg)
+			return args.Get(0).(bytes.Buffer), args.Get(1).(bytes.Buffer), args.Error(2)
+		},
+		Prompter: testOpts.Prompter,
+		AskOne: func(templateContents string, contents any) error {
+			args := testOpts.Mock.MethodCalled("AskOne", templateContents, contents)
+			return args.Error(0)
+		},
+		GetRemoteName: func() (string, error) {
+			args := testOpts.Mock.MethodCalled("GetRemoteName")
+			return args.String(0), args.Error(1)
+		},
+	}
+}
 
 func TestFindPrefixLength(t *testing.T) {
 	tests := []struct {
@@ -119,4 +154,82 @@ func TestBuildShortNames(t *testing.T) {
 			assert.Equal(t, tt.expected, actual)
 		})
 	}
+}
+
+func TestPlanForFile_emptyPlanMultipleOwners(t *testing.T) {
+	plan := NewPullRequestPlan()
+
+	plan.PlanForFile("test-file.txt", []string{"@team-1", "@team-2"})
+
+	// When there are multiple owners and nothing already in the team files list
+	// it's expected to go to the first team, this could change if we offer a
+	// smarter algorithm for spreading.
+	assert.Equal(t, 1, len(plan.TeamFiles))
+	assert.Equal(t, []string{"test-file.txt"}, plan.TeamFiles["@team-1"])
+}
+
+func TestPlanForFile_ownerAlreadyOwnsAFile(t *testing.T) {
+	plan := NewPullRequestPlan()
+	plan.TeamFiles["@team-2"] = []string{"somefile.txt"}
+
+	plan.PlanForFile("test-file.txt", []string{"@team-1", "@team-2"})
+
+	// When a team already owns a file the plan will always try to prefer that to minimize
+	// the amount of PRs we create.
+	assert.Equal(t, 1, len(plan.TeamFiles))
+	assert.Equal(t, []string{"somefile.txt", "test-file.txt"}, plan.TeamFiles["@team-2"])
+}
+
+func TestPlanForFile_noOwners(t *testing.T) {
+	plan := NewPullRequestPlan()
+
+	plan.PlanForFile("test-file.txt", []string{})
+
+	assert.Equal(t, []string{"test-file.txt"}, plan.UnownedFiles)
+}
+
+func TestPlanForFile_noOwnersExistingItemsInSlice(t *testing.T) {
+	plan := NewPullRequestPlan()
+
+	plan.UnownedFiles = []string{"somefile.txt"}
+
+	plan.PlanForFile("test-file.txt", []string{})
+
+	assert.Equal(t, []string{"somefile.txt", "test-file.txt"}, plan.UnownedFiles)
+}
+
+func TestMoveUnownedFiles_teamSelected(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", "Choose where to put 1 unowned files", "", []string{"@team-1", "@team-2", "Separate", "Choose for each"}).
+		Return(1, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"test-file.txt"}
+
+	plan.MoveUnownedFiles(toActual(opts))
+
+	assert.Equal(t, []string{"two.txt", "test-file.txt"}, plan.TeamFiles["@team-2"])
+}
+
+func TestMoveUnownedFiles_separateSelected(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", "Choose where to put 1 unowned files", "", []string{"@team-1", "@team-2", "Separate", "Choose for each"}).
+		Return(2, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"test-file.txt"}
+
+	plan.MoveUnownedFiles(toActual(opts))
+
+	assert.Equal(t, []string{"test-file.txt"}, plan.SeparateFiles)
 }
