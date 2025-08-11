@@ -218,3 +218,41 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *internal.TestRo
 
 	return testOpts
 }
+
+func TestMain(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		expectedErr string
+		promptStubs func(*internal.MockPrompter)
+	}{
+		{
+			name:        "Test",
+			args:        []string{"report"},
+			expectedErr: "",
+			promptStubs: func(m *internal.MockPrompter) {
+
+			},
+		},
+	}
+
+	// TODO: Make use genuine file system and git
+	// but not gh or stdout, prompter
+	opts := &cmd.RootCmdOptions{}
+
+	// TODO: Do global setup
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// TODO: Do common test setup
+
+			// TODO: Do test specific setup
+			err := mainCore(opts, tt.args)
+			if tt.expectedErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Equal(t, tt.expectedErr, err)
+			}
+		})
+	}
+}

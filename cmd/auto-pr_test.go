@@ -6,6 +6,7 @@ import (
 
 	"github.com/justindbaur/gh-codeowners/internal"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 func toActual(testOpts *internal.TestRootCmdOptions) *RootCmdOptions {
@@ -229,7 +230,57 @@ func TestMoveUnownedFiles_separateSelected(t *testing.T) {
 	}
 	plan.UnownedFiles = []string{"test-file.txt"}
 
-	plan.MoveUnownedFiles(toActual(opts))
+	err := plan.MoveUnownedFiles(toActual(opts))
 
+	assert.NoError(t, err)
 	assert.Equal(t, []string{"test-file.txt"}, plan.SeparateFiles)
+}
+
+func TestMoveUnownedFiles_chooseEachSelected(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", "Choose where to put 1 unowned files", "", []string{"@team-1", "@team-2", "Separate", "Choose for each"}).
+		Return(3, nil)
+
+	opts.Prompter.
+		On("MultiSelect", mock.Anything, []string{}, []string{"@team-1", "@team-2", "Separate"}).
+		Return([]int{0}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"test-file.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"one.txt", "test-file.txt"}, plan.TeamFiles["@team-1"])
+}
+
+func TestMoveUnownedFiles_chooseMultipleTeams(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", "Choose where to put 1 unowned files", "", []string{"@team-1", "@team-2", "Separate", "Choose for each"}).
+		Return(3, nil)
+
+	opts.Prompter.
+		On("MultiSelect", mock.Anything, []string{}, []string{"@team-1", "@team-2", "Separate"}).
+		Return([]int{0, 1}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"teo.txt"},
+	}
+	plan.UnownedFiles = []string{"test-file.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+
+	assert.NoError(t, err)
+	assert.Equal(t, map[string][]string{
+		"@team-1": {"test-file.txt"},
+		"@team-2": {"test-file.txt"},
+	}, plan.InteractiveStageFiles)
 }
