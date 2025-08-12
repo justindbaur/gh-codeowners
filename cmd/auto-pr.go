@@ -433,6 +433,13 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 	// Stdout should be a url to the PR
 	cmd.Printf("PR for %s: %s", data.TeamId, stdOut.String())
 
+	err = createStash(opts)
+
+	if err != nil {
+		cmd.Println("Failed to create stash")
+		return err
+	}
+
 	// TODO: This doesn't work if interactive staging happened
 	// Checkout back to the last branch so we can continue with new teams or leave the user back where they were
 	checkoutOutput, err = opts.GitExec("checkout", "-")
@@ -441,6 +448,13 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		cmd.Println("Could not checkout last branch")
 		cmd.ErrOrStderr().Write(checkoutOutput)
 		return fmt.Errorf("error trying to checkout base branch: %v", err)
+	}
+
+	err = applyStash(opts)
+
+	if err != nil {
+		cmd.Println("Failed to apply stash")
+		return err
 	}
 
 	return nil
@@ -626,6 +640,18 @@ func buildShortNames(teams []string) map[string]string {
 	}
 
 	return output
+}
+
+func createStash(opts *RootCmdOptions) error {
+	// TODO: Make smarter with a custom message
+	_, err := opts.GitExec("stash", "push")
+	return err
+}
+
+func applyStash(opts *RootCmdOptions) error {
+	// TODO: Make smarter and apply the stash this program creates by name
+	_, err := opts.GitExec("stash", "pop")
+	return err
 }
 
 type TemplateData struct {
