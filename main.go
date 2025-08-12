@@ -19,15 +19,15 @@ import (
 )
 
 type RealFile struct {
-	*os.File
+	innerFile *os.File
 }
 
 func (file *RealFile) Reader() io.Reader {
-	return file
+	return file.innerFile
 }
 
 func (file *RealFile) Close() error {
-	return file.Close()
+	return file.innerFile.Close()
 }
 
 var remoteRE = regexp.MustCompile(`(.+)\s+(.+)\s+\((push|fetch)\)`)
@@ -79,7 +79,7 @@ func main() {
 				return
 			}
 
-			return &RealFile{actualFile}, nil
+			return &RealFile{innerFile: actualFile}, nil
 		},
 		GetRemoteName: func() (string, error) {
 			remoteOutput, err := exec.Command(gitBin, "remote", "-v").Output()
