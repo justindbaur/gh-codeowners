@@ -515,6 +515,8 @@ func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *A
 				return err
 			}
 
+			var initialContents = ""
+
 			// Is this the last option that we insert for blank
 			if len(templates) != templateOption {
 				templateFile, err := rootOpts.ReadFile(templates[templateOption])
@@ -532,8 +534,17 @@ func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *A
 					return err
 				}
 
-				autoPrOpts.BodyTemplate = builder.String()
+				initialContents = builder.String()
 			}
+
+			var contents string
+			err = rootOpts.AskOne(initialContents, &contents)
+
+			if err != nil {
+				return err
+			}
+
+			autoPrOpts.BodyTemplate = contents
 		}
 	}
 
