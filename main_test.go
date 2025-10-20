@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 
+	"github.com/cli/safeexec"
 	"github.com/justindbaur/gh-codeowners/cmd"
 	"github.com/justindbaur/gh-codeowners/internal"
 	"github.com/stretchr/testify/assert"
@@ -106,6 +108,16 @@ func TestMainCoreAutoPR(t *testing.T) {
 	testOpts.Mock.On("GitExec", []string{
 		"rev-parse",
 		"--show-toplevel"}).Return(fmt.Appendf(nil, "%s\n", tempDir), nil)
+
+	testOpts.Mock.On("GitExec", []string{
+		"stash",
+		"push",
+	}).Return([]byte{}, nil)
+
+	testOpts.Mock.On("GitExec", []string{
+		"stash",
+		"pop",
+	}).Return([]byte{}, nil)
 
 	testOpts.Mock.On("ReadFile", "./.github/PULL_REQUEST_TEMPLATE.md").Return(&internal.TestFile{
 		Contents: "My PR template!",
@@ -225,6 +237,7 @@ func TestMain(t *testing.T) {
 		args        []string
 		expectedErr string
 		promptStubs func(*internal.MockPrompter)
+		assertOut   func(t *testing.T, out string)
 	}{
 		{
 			name:        "Test",
@@ -233,23 +246,62 @@ func TestMain(t *testing.T) {
 			promptStubs: func(m *internal.MockPrompter) {
 
 			},
+			assertOut: func(t *testing.T, out string) {
+				assert.Equal(t, "Files that are unowned: 1\n", out)
+			},
 		},
 	}
 
-	// TODO: Make use genuine file system and git
-	// but not gh or stdout, prompter
-	opts := &cmd.RootCmdOptions{}
+	gitBin, err := safeexec.LookPath("git")
+
+	if err != nil {
+		t.Fatal("Could not locate git.")
+	}
 
 	// TODO: Do global setup
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			mock := &mock.Mock{}
+
+			out := new(bytes.Buffer)
+
+			// TODO: Make use genuine file system and git
+			// but not gh or stdout, prompter
+			opts := &cmd.RootCmdOptions{
+				GitExec: func(arg ...string) ([]byte, error) {
+					// Allow for an override
+					if mock.IsMethodCallable(t, "GitExec", arg) {
+						args := mock.MethodCalled("GitExec", arg)
+						return args.Get(0).([]byte), args.Error(1)
+					}
+
+					// Genuine git
+					return exec.Command(gitBin, arg...).Output()
+				},
+				ReadFile: func(filePath string) (file cmd.File, err error) {
+					// Genuine file system
+					actualFile, err := os.Open(filePath)
+
+					if err != nil {
+						return
+					}
+
+					return &RealFile{innerFile: actualFile}, nil
+				},
+				Out: out,
+			}
+
 			// TODO: Do common test setup
 
 			// TODO: Do test specific setup
 			err := mainCore(opts, tt.args)
 			if tt.expectedErr == "" {
 				assert.NoError(t, err)
+
+				if tt.assertOut != nil {
+					tt.assertOut(t, out.String())
+				}
 			} else {
 				assert.Equal(t, tt.expectedErr, err)
 			}
