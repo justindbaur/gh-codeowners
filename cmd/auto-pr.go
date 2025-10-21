@@ -362,6 +362,7 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 	}
 
 	// Create commit
+	cmd.Printf("Doing commit for %s", data.TeamId)
 	commitArgs := []string{"commit", "--message", teamCommit}
 
 	commitOutput, err := opts.GitExec(commitArgs...)

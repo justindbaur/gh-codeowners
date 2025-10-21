@@ -65,9 +65,15 @@ func (testOpts *TestRootCmdOptions) MockCodeowners(codeownersContent []string) {
 }
 
 func (testOpts *TestRootCmdOptions) MockWorkingDirectory(files []string) {
+	newFiles := make([]string, len(files))
+
+	for i, file := range files {
+		newFiles[i] = fmt.Sprintf("?? %s", file)
+	}
+
 	testOpts.Mock.
-		On("GitExec", []string{"--no-pager", "diff", "--name-only"}).
-		Return([]byte(strings.Join(files, "\n")), nil)
+		On("GitExec", []string{"status", "--untracked-files=all", "--null"}).
+		Return(append([]byte(strings.Join(newFiles, string(byte(0)))), byte(0)), nil)
 }
 
 func NewTestRootOpts() *TestRootCmdOptions {

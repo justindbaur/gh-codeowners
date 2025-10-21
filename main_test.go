@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cli/safeexec"
 	"github.com/justindbaur/gh-codeowners/cmd"
@@ -165,7 +167,7 @@ func TestMainCoreAutoPR(t *testing.T) {
 }
 
 func TestMainCoreAutoPR_withArgsMakesTwoPRS(t *testing.T) {
-	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt\n")
+	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt")
 
 	opts.MockTemplateHole("@team-1", "Team Name", "one")
 	opts.MockTemplateHole("@team-2", "Team Name", "two")
@@ -223,7 +225,7 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *internal.TestRo
 		*contents = "My PR template!\nFor {slug}: {Team Name}"
 	}).Return(nil)
 
-	testOpts.Mock.On("GitExec", []string{"--no-pager", "diff", "--name-only"}).Return([]byte(workingTree), nil)
+	testOpts.MockWorkingDirectory(strings.Split(workingTree, "\n"))
 
 	// For anything else just pretend success
 	testOpts.Mock.On("GitExec", mock.Anything).Return([]byte{}, nil)
@@ -238,7 +240,42 @@ type TestFile struct {
 	contents string
 }
 
+type testWriter struct {
+	label string
+	buf   *bytes.Buffer
+	t     *testing.T
+}
+
+func (w *testWriter) Write(b []byte) (int, error) {
+	w.t.Logf("%s: %s", w.label, string(b))
+	return w.buf.Write(b)
+}
+
+func NewTestWriter(t *testing.T, label string) *testWriter {
+	return &testWriter{
+		t:     t,
+		label: label,
+		buf:   new(bytes.Buffer),
+	}
+}
+
 func TestMain(t *testing.T) {
+	gitBin, err := safeexec.LookPath("git")
+
+	if err != nil {
+		t.Fatalf("Could not locate git: %v", err)
+	}
+
+	execGit := func(t *testing.T, arg ...string) {
+		cmd := exec.Command(gitBin, arg...)
+		cmd.WaitDelay = time.Duration(10) * time.Second
+		gitOutput, err := cmd.Output()
+		if err != nil {
+			assert.Fail(t, string(gitOutput))
+		}
+		t.Logf("execGit (%s): %s", arg, string(gitOutput))
+	}
+
 	tests := []struct {
 		name         string
 		args         []string
@@ -277,9 +314,28 @@ func TestMain(t *testing.T) {
 		},
 		{
 			name:        "Auto PR",
-			args:        []string{"auto-pr"},
+			args:        []string{"auto-pr", "--branch", "branch/{{ .Input \"Name\"}}", "--commit", "My Commit {{ .Input \"Name\"}}"},
 			expectedErr: "",
-			promptStubs: func(mp *internal.MockPrompter) {},
+			promptStubs: func(mp *internal.MockPrompter) {
+				mp.On(
+					"Select",
+					"Choose where to put 1 unowned files",
+					"",
+					[]string{"@my-org/one", "@my-org/two", "Separate", "Choose for each"}).Return(3, nil)
+
+				mp.On(
+					"MultiSelect",
+					"What teams should 'unowned.txt' be put into (can select multiple)",
+					[]string{},
+					[]string{"@my-org/one", "@my-org/two", "Separate"},
+				).Return([]int{0, 1}, nil)
+
+				mp.On(
+					"Input",
+					"one: Name",
+					"",
+				).Return("One", nil)
+			},
 			initialFiles: []TestFile{
 				{
 					name:     ".github/CODEOWNERS",
@@ -303,31 +359,14 @@ func TestMain(t *testing.T) {
 		},
 	}
 
-	gitBin, err := safeexec.LookPath("git")
-
-	if err != nil {
-		t.Fatalf("Could not locate git: %v", err)
-	}
-
 	// TODO: Do global setup
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testDir, err := os.MkdirTemp("", "")
-			t.Logf("testDir: %s", testDir)
-			assert.NoError(t, err)
-			defer os.RemoveAll(testDir)
-
-			execGit := func(arg ...string) {
-				cmd := exec.Command(gitBin, arg...)
-				cmd.Dir = testDir
-				gitOutput, err := cmd.Output()
-				if err != nil {
-					assert.Fail(t, string(gitOutput))
-				}
-			}
-
-			execGit("init")
+			testDir := t.TempDir()
+			t.Logf("TestDir: %s", testDir)
+			os.Chdir(testDir)
+			execGit(t, "init")
 
 			if tt.initialFiles != nil {
 				for _, file := range tt.initialFiles {
@@ -337,8 +376,8 @@ func TestMain(t *testing.T) {
 					assert.NoError(t, err)
 				}
 
-				execGit("add", ".")
-				execGit("commit", "--message", "Initial commit")
+				execGit(t, "add", ".")
+				execGit(t, "commit", "--no-gpg-sign", "--message", "Initial commit")
 			}
 
 			if tt.updatedFiles != nil {
@@ -352,31 +391,48 @@ func TestMain(t *testing.T) {
 				}
 			}
 
-			mock := &mock.Mock{}
+			testMock := &mock.Mock{}
 
-			out := new(bytes.Buffer)
+			// We won't have an actual remote to push to
+			testMock.On("GitExec", mock.MatchedBy(func(args []string) bool {
+				return len(args) == 4 && args[0] == "push" && args[1] == "--set-upstream" && args[2] == "origin"
+			})).Return([]byte{}, nil)
+
+			stdout := NewTestWriter(t, "out")
+			stderr := NewTestWriter(t, "err")
+
+			prompter := internal.NewMockPrompter()
+
+			if tt.promptStubs != nil {
+				tt.promptStubs(prompter)
+			}
 
 			// TODO: Make use genuine file system and git
 			// but not gh or stdout, prompter
 			opts := &cmd.RootCmdOptions{
 				GitExec: func(arg ...string) ([]byte, error) {
 					// Allow for an override
-					if mock.IsMethodCallable(t, "GitExec", arg) {
-						args := mock.MethodCalled("GitExec", arg)
+					if customIsMethodCallable(testMock, "GitExec", arg) {
+						args := testMock.MethodCalled("GitExec", arg)
 						return args.Get(0).([]byte), args.Error(1)
 					}
-
-					t.Logf("genuine git command: %s", arg)
 
 					// Genuine git
 					cmd := exec.Command(gitBin, arg...)
 					cmd.Dir = testDir
+					cmd.WaitDelay = time.Duration(10) * time.Second
 					output, err := cmd.Output()
 					if err != nil {
-
+						t.Logf("git (%s) error: %v\n%s", arg, err, output)
+					} else {
+						t.Logf("git (%s) success:\n%s", arg, output)
 					}
 
 					return output, err
+				},
+				GitExecInt: func(arg ...string) error {
+					// TODO: Do something
+					return nil
 				},
 				ReadFile: func(filePath string) (file cmd.File, err error) {
 					// Genuine file system
@@ -388,20 +444,50 @@ func TestMain(t *testing.T) {
 
 					return &RealFile{innerFile: actualFile}, nil
 				},
-				Out: out,
+				Out:      stdout,
+				Err:      stderr,
+				Prompter: prompter,
+				GetRemoteName: func() (string, error) {
+					// TODO: Do this genuinely?
+					return "origin", nil
+				},
+				GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
+					return *bytes.NewBufferString(""), *bytes.NewBufferString(""), nil
+				},
 			}
 
-			os.Chdir(testDir)
 			err = mainCore(opts, tt.args)
 			if tt.expectedErr == "" {
 				assert.NoError(t, err)
 
 				if tt.assertOut != nil {
-					tt.assertOut(t, out.String())
+					tt.assertOut(t, stdout.buf.String())
 				}
 			} else {
 				assert.Equal(t, tt.expectedErr, err)
 			}
 		})
 	}
+}
+
+// Ref: https://github.com/stretchr/testify/issues/1712
+func customIsMethodCallable(mock *mock.Mock, method string, arguments ...interface{}) bool {
+	for _, call := range mock.ExpectedCalls {
+		if call.Method != method {
+			continue
+		}
+
+		_, diffCount := call.Arguments.Diff(arguments)
+		if diffCount != 0 {
+			continue
+		}
+
+		if call.Repeatability < 0 {
+			return false
+		}
+
+		return true
+	}
+
+	return false
 }
