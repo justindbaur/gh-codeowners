@@ -268,7 +268,6 @@ func TestMain(t *testing.T) {
 
 	execGit := func(t *testing.T, arg ...string) {
 		cmd := exec.Command(gitBin, arg...)
-		cmd.WaitDelay = time.Duration(10) * time.Second
 		gitOutput, err := cmd.Output()
 		if err != nil {
 			assert.Fail(t, string(gitOutput))
@@ -282,6 +281,7 @@ func TestMain(t *testing.T) {
 		initialFiles []TestFile
 		updatedFiles []TestFile
 		expectedErr  string
+		preMock      func(m *mock.Mock)
 		promptStubs  func(*internal.MockPrompter)
 		assertOut    func(t *testing.T, out string)
 	}{
@@ -313,7 +313,7 @@ func TestMain(t *testing.T) {
 			},
 		},
 		{
-			name:        "Auto PR",
+			name:        "Auto PR with interactive staging",
 			args:        []string{"auto-pr", "--branch", "branch/{{ .Input \"Name\"}}", "--commit", "My Commit {{ .Input \"Name\"}}"},
 			expectedErr: "",
 			promptStubs: func(mp *internal.MockPrompter) {
@@ -335,11 +335,21 @@ func TestMain(t *testing.T) {
 					"one: Name",
 					"",
 				).Return("One", nil)
+
+				mp.On(
+					"Input",
+					"two: Name",
+					"",
+				).Return("Two", nil)
 			},
 			initialFiles: []TestFile{
 				{
 					name:     ".github/CODEOWNERS",
 					contents: "one @my-org/one\ntwo @my-org/two\n",
+				},
+				{
+					name:     "unowned.txt",
+					contents: "This is the first portion.\n\nStable\n\nStable\n\nStable\n\nThis is the second portion.\n",
 				},
 			},
 			updatedFiles: []TestFile{
@@ -353,8 +363,27 @@ func TestMain(t *testing.T) {
 				},
 				{
 					name:     "unowned.txt",
-					contents: "unowned!",
+					contents: "This is the first portion\n\nStable\n\nStable\n\nStable\n\nThis is the second portion\n",
 				},
+			},
+			preMock: func(m *mock.Mock) {
+				m.On("GitExecInt", mock.MatchedBy(func(args []string) bool {
+					return len(args) == 3 && args[0] == "add" && args[1] == "--patch"
+				})).Run(func(args mock.Arguments) {
+					file := args.Get(0).([]string)[2]
+					cmd := exec.Command(gitBin, "add", "--patch", file)
+					cmd.Stdin = bytes.NewReader([]byte("y\nn"))
+					assert.NoError(t, cmd.Run())
+				}).Once().Return(nil)
+
+				m.On("GitExecInt", mock.MatchedBy(func(args []string) bool {
+					return len(args) == 3 && args[0] == "add" && args[1] == "--patch"
+				})).Run(func(args mock.Arguments) {
+					file := args.Get(0).([]string)[2]
+					cmd := exec.Command(gitBin, "add", "--patch", file)
+					cmd.Stdin = bytes.NewReader([]byte("y"))
+					assert.NoError(t, cmd.Run())
+				}).Once().Return(nil)
 			},
 		},
 	}
@@ -368,6 +397,10 @@ func TestMain(t *testing.T) {
 			os.Chdir(testDir)
 			execGit(t, "init")
 
+			// I personally use a signing key based gpg signature and this breaks being able to run this test
+			// automatically, so I turn it off just for this repo
+			execGit(t, "config", "--local", "commit.gpgsign", "false")
+
 			if tt.initialFiles != nil {
 				for _, file := range tt.initialFiles {
 					fullPath := path.Join(testDir, file.name)
@@ -377,7 +410,7 @@ func TestMain(t *testing.T) {
 				}
 
 				execGit(t, "add", ".")
-				execGit(t, "commit", "--no-gpg-sign", "--message", "Initial commit")
+				execGit(t, "commit", "--message", "Initial commit")
 			}
 
 			if tt.updatedFiles != nil {
@@ -431,8 +464,8 @@ func TestMain(t *testing.T) {
 					return output, err
 				},
 				GitExecInt: func(arg ...string) error {
-					// TODO: Do something
-					return nil
+					args := testMock.MethodCalled("GitExecInt", arg)
+					return args.Error(0)
 				},
 				ReadFile: func(filePath string) (file cmd.File, err error) {
 					// Genuine file system
@@ -452,8 +485,18 @@ func TestMain(t *testing.T) {
 					return "origin", nil
 				},
 				GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
-					return *bytes.NewBufferString(""), *bytes.NewBufferString(""), nil
+					if len(arg) == 8 && arg[0] == "pr" && arg[1] == "new" {
+						t.Logf("GhExec: %s", arg)
+						return *bytes.NewBufferString("https://github.com/fake-org/fake-repo/pulls/1"), *bytes.NewBufferString(""), nil
+					}
+
+					t.Logf("Unimplemented GhExec: %s", arg)
+					return *bytes.NewBufferString(""), *bytes.NewBufferString(""), fmt.Errorf("not implemented")
 				},
+			}
+
+			if tt.preMock != nil {
+				tt.preMock(testMock)
 			}
 
 			err = mainCore(opts, tt.args)
