@@ -133,7 +133,7 @@ func (plan *PullRequestPlan) DoInteractiveStagingIfNeeded(team string, opts *Roo
 		return nil
 	}
 
-	return opts.GitExecInt(append([]string{"add", "--interactive"}, filesToStage...)...)
+	return opts.GitExecInt(append([]string{"add", "--patch"}, filesToStage...)...)
 }
 
 func NewPullRequestPlan() *PullRequestPlan {
@@ -434,7 +434,7 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 	// Stdout should be a url to the PR
 	cmd.Printf("PR for %s: %s", data.TeamId, stdOut.String())
 
-	err = createStash(opts)
+	stashed, err := createStash(opts)
 
 	if err != nil {
 		cmd.Println("Failed to create stash")
@@ -449,6 +449,10 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		cmd.Println("Could not checkout last branch")
 		cmd.ErrOrStderr().Write(checkoutOutput)
 		return fmt.Errorf("error trying to checkout base branch: %v", err)
+	}
+
+	if !stashed {
+		return nil
 	}
 
 	err = applyStash(opts)
@@ -643,15 +647,21 @@ func buildShortNames(teams []string) map[string]string {
 	return output
 }
 
-func createStash(opts *RootCmdOptions) error {
+func createStash(opts *RootCmdOptions) (bool, error) {
 	// TODO: Make smarter with a custom message
-	_, err := opts.GitExec("stash", "push")
-	return err
+	stashOutput, err := opts.GitExec("stash", "push")
+
+	if err == nil && string(stashOutput) == "No local changes to save\n" {
+		return false, err
+	}
+
+	return err == nil, err
 }
 
 func applyStash(opts *RootCmdOptions) error {
 	// TODO: Make smarter and apply the stash this program creates by name
 	_, err := opts.GitExec("stash", "pop")
+
 	return err
 }
 
@@ -671,6 +681,7 @@ func (d *TemplateData) Input(name string) (string, error) {
 	existingValue, found := d.inputCache[name]
 
 	if !found {
+		// TODO: Change this to team id
 		val, err := d.prompter.Input(fmt.Sprintf("%s: %s", d.Name, name), "")
 
 		if err != nil {
