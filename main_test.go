@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"testing"
 
 	"github.com/cli/safeexec"
@@ -231,23 +233,72 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *internal.TestRo
 	return testOpts
 }
 
+type TestFile struct {
+	name     string
+	contents string
+}
+
 func TestMain(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		expectedErr string
-		promptStubs func(*internal.MockPrompter)
-		assertOut   func(t *testing.T, out string)
+		name         string
+		args         []string
+		initialFiles []TestFile
+		updatedFiles []TestFile
+		expectedErr  string
+		promptStubs  func(*internal.MockPrompter)
+		assertOut    func(t *testing.T, out string)
 	}{
 		{
-			name:        "Test",
+			name:        "Simple Report",
 			args:        []string{"report"},
 			expectedErr: "",
 			promptStubs: func(m *internal.MockPrompter) {
 
 			},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.txt @my-org/my-team",
+				},
+				{
+					name:     "file.txt",
+					contents: "yo!",
+				},
+			},
+			updatedFiles: []TestFile{
+				{
+					name:     "file.txt",
+					contents: "hello!",
+				},
+			},
 			assertOut: func(t *testing.T, out string) {
-				assert.Equal(t, "Files that are unowned: 1\n", out)
+				assert.Equal(t, "@my-org/my-team: 1\n", out)
+			},
+		},
+		{
+			name:        "Auto PR",
+			args:        []string{"auto-pr"},
+			expectedErr: "",
+			promptStubs: func(mp *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "one @my-org/one\ntwo @my-org/two\n",
+				},
+			},
+			updatedFiles: []TestFile{
+				{
+					name:     "one/file.txt",
+					contents: "1",
+				},
+				{
+					name:     "two/file.txt",
+					contents: "2",
+				},
+				{
+					name:     "unowned.txt",
+					contents: "unowned!",
+				},
 			},
 		},
 	}
@@ -255,13 +306,52 @@ func TestMain(t *testing.T) {
 	gitBin, err := safeexec.LookPath("git")
 
 	if err != nil {
-		t.Fatal("Could not locate git.")
+		t.Fatalf("Could not locate git: %v", err)
 	}
 
 	// TODO: Do global setup
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			testDir, err := os.MkdirTemp("", "")
+			t.Logf("testDir: %s", testDir)
+			assert.NoError(t, err)
+			defer os.RemoveAll(testDir)
+
+			execGit := func(arg ...string) {
+				cmd := exec.Command(gitBin, arg...)
+				cmd.Dir = testDir
+				gitOutput, err := cmd.Output()
+				if err != nil {
+					assert.Fail(t, string(gitOutput))
+				}
+			}
+
+			execGit("init")
+
+			if tt.initialFiles != nil {
+				for _, file := range tt.initialFiles {
+					fullPath := path.Join(testDir, file.name)
+					os.MkdirAll(filepath.Dir(fullPath), os.ModePerm)
+					err = os.WriteFile(fullPath, []byte(file.contents), os.ModePerm)
+					assert.NoError(t, err)
+				}
+
+				execGit("add", ".")
+				execGit("commit", "--message", "Initial commit")
+			}
+
+			if tt.updatedFiles != nil {
+				for _, file := range tt.updatedFiles {
+					fullPath := path.Join(testDir, file.name)
+					assert.NoError(t, os.MkdirAll(filepath.Dir(fullPath), os.ModePerm))
+					assert.NoError(
+						t,
+						os.WriteFile(fullPath, []byte(file.contents), os.ModePerm),
+					)
+				}
+			}
+
 			mock := &mock.Mock{}
 
 			out := new(bytes.Buffer)
@@ -276,8 +366,17 @@ func TestMain(t *testing.T) {
 						return args.Get(0).([]byte), args.Error(1)
 					}
 
+					t.Logf("genuine git command: %s", arg)
+
 					// Genuine git
-					return exec.Command(gitBin, arg...).Output()
+					cmd := exec.Command(gitBin, arg...)
+					cmd.Dir = testDir
+					output, err := cmd.Output()
+					if err != nil {
+
+					}
+
+					return output, err
 				},
 				ReadFile: func(filePath string) (file cmd.File, err error) {
 					// Genuine file system
@@ -292,10 +391,8 @@ func TestMain(t *testing.T) {
 				Out: out,
 			}
 
-			// TODO: Do common test setup
-
-			// TODO: Do test specific setup
-			err := mainCore(opts, tt.args)
+			os.Chdir(testDir)
+			err = mainCore(opts, tt.args)
 			if tt.expectedErr == "" {
 				assert.NoError(t, err)
 
