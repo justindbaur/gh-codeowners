@@ -56,6 +56,7 @@ func (plan *PullRequestPlan) HasUnownedFiles() bool {
 
 func (plan *PullRequestPlan) MoveUnownedFiles(opts *RootCmdOptions) error {
 	teamNames := slices.Collect(maps.Keys(plan.TeamFiles))
+	sort.Strings(teamNames)
 	generalOptions := append(teamNames, "Separate", "Choose for each")
 	generalOptionIndex, err := opts.Prompter.Select(fmt.Sprintf("Choose where to put %d unowned files", len(plan.UnownedFiles)), "", generalOptions)
 
