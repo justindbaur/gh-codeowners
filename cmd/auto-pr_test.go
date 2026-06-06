@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/justindbaur/gh-codeowners/internal"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -283,4 +287,326 @@ func TestMoveUnownedFiles_chooseMultipleTeams(t *testing.T) {
 		"@team-1": {"test-file.txt"},
 		"@team-2": {"test-file.txt"},
 	}, plan.InteractiveStageFiles)
+}
+
+func TestMoveUnownedFiles_selectError(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", mock.Anything, mock.Anything, mock.Anything).
+		Return(0, fmt.Errorf("terminal closed"))
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{"@team-1": {"one.txt"}}
+	plan.UnownedFiles = []string{"unowned.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+	assert.ErrorContains(t, err, "terminal closed")
+}
+
+func TestMoveUnownedFiles_chooseForEachNoItemsSelected(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	// "Choose for each" is the last general option (index 3 for 2 teams).
+	opts.Prompter.
+		On("Select", mock.Anything, mock.Anything, mock.Anything).
+		Return(3, nil)
+	opts.Prompter.
+		On("MultiSelect", mock.Anything, mock.Anything, mock.Anything).
+		Return([]int{}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"unowned.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+	assert.ErrorContains(t, err, "must select at least one action")
+}
+
+func TestMoveUnownedFiles_chooseForEachSeparateWithTeamError(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", mock.Anything, mock.Anything, mock.Anything).
+		Return(3, nil)
+	// For 2 teams, specificOptions = ["@team-1", "@team-2", "Separate"].
+	// Selecting both @team-1 (0) and Separate (2) together is invalid.
+	opts.Prompter.
+		On("MultiSelect", mock.Anything, mock.Anything, mock.Anything).
+		Return([]int{0, 2}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"unowned.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+	assert.ErrorContains(t, err, "cannot select Separate alongside a team")
+}
+
+func TestMoveUnownedFiles_chooseForEachSeparateOnly(t *testing.T) {
+	// When the user selects only "Separate" in the per-file multi-select, the file
+	// should land in SeparateFiles without any panic (tests the bug-fix guard on the
+	// interactive-staging loop).
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", mock.Anything, mock.Anything, mock.Anything).
+		Return(3, nil)
+	// Index 2 = "Separate" (len(teamNames) == 2).
+	opts.Prompter.
+		On("MultiSelect", mock.Anything, mock.Anything, mock.Anything).
+		Return([]int{2}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"unowned.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"unowned.txt"}, plan.SeparateFiles)
+	assert.Empty(t, plan.InteractiveStageFiles)
+}
+
+func TestMoveUnownedFiles_chooseForEachUpdatesExistingTeamEntry(t *testing.T) {
+	// Two unowned files both routed to @team-1 exercises the "found" branch of the
+	// InteractiveStageFiles map update.
+	opts := internal.NewTestRootOpts()
+	opts.Prompter.
+		On("Select", mock.Anything, mock.Anything, mock.Anything).
+		Return(3, nil)
+	opts.Prompter.
+		On("MultiSelect", "What teams should 'first.txt' be put into (can select multiple)",
+			[]string{}, []string{"@team-1", "@team-2", "Separate"}).
+		Return([]int{0}, nil)
+	opts.Prompter.
+		On("MultiSelect", "What teams should 'second.txt' be put into (can select multiple)",
+			[]string{}, []string{"@team-1", "@team-2", "Separate"}).
+		Return([]int{0}, nil)
+
+	plan := NewPullRequestPlan()
+	plan.TeamFiles = map[string][]string{
+		"@team-1": {"one.txt"},
+		"@team-2": {"two.txt"},
+	}
+	plan.UnownedFiles = []string{"first.txt", "second.txt"}
+
+	err := plan.MoveUnownedFiles(toActual(opts))
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"first.txt", "second.txt"}, plan.InteractiveStageFiles["@team-1"])
+}
+
+func TestBuildShortNames_singleTeamPanics(t *testing.T) {
+	assert.Panics(t, func() {
+		buildShortNames([]string{"@only-one-team"})
+	})
+}
+
+func newBodyTemplateTestCmd() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("body", "", "")
+	return cmd
+}
+
+func TestGetBodyTemplate_skipsWhenBodyFlagProvided(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	err := cmd.Flags().Set("body", "already set")
+	assert.NoError(t, err)
+
+	autoPrOpts := &AutoPROptions{BodyTemplate: "already set"}
+
+	err = getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "already set", autoPrOpts.BodyTemplate)
+	opts.Mock.AssertNotCalled(t, "GitExec", mock.Anything)
+	opts.Mock.AssertNotCalled(t, "AskOne", mock.Anything, mock.Anything)
+	opts.Prompter.AssertNotCalled(t, "Select", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestGetBodyTemplate_noTemplatesFound(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	tempDir := t.TempDir()
+
+	opts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
+		Return([]byte(tempDir+"\n"), nil)
+
+	autoPrOpts := &AutoPROptions{}
+
+	err := getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Empty(t, autoPrOpts.BodyTemplate)
+	opts.Mock.AssertNotCalled(t, "AskOne", mock.Anything, mock.Anything)
+	opts.Prompter.AssertNotCalled(t, "Select", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestGetBodyTemplate_usesSelectedTemplateContents(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	tempDir := t.TempDir()
+	templatePath := filepath.Join(tempDir, ".github", "PULL_REQUEST_TEMPLATE.md")
+
+	err := os.MkdirAll(filepath.Dir(templatePath), 0o755)
+	assert.NoError(t, err)
+	err = os.WriteFile(templatePath, []byte("Template from disk"), 0o644)
+	assert.NoError(t, err)
+
+	opts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
+		Return([]byte(tempDir+"\n"), nil)
+	opts.Prompter.On("Select", "Choose a template", mock.Anything, []string{"PULL_REQUEST_TEMPLATE.md", "Start with a blank pull request"}).
+		Return(0, nil)
+	opts.Mock.On("ReadFile", templatePath).Return(&internal.TestFile{
+		Contents: "Template from disk",
+	}, nil)
+	opts.Mock.On("AskOne", "Template from disk", mock.Anything).Run(func(args mock.Arguments) {
+		contents := args.Get(1).(*string)
+		*contents = "Final body"
+	}).Return(nil)
+
+	autoPrOpts := &AutoPROptions{}
+
+	err = getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "Final body", autoPrOpts.BodyTemplate)
+}
+
+func TestGetBodyTemplate_blankOptionStartsEmpty(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	tempDir := t.TempDir()
+	templatePath := filepath.Join(tempDir, ".github", "PULL_REQUEST_TEMPLATE.md")
+
+	err := os.MkdirAll(filepath.Dir(templatePath), 0o755)
+	assert.NoError(t, err)
+	err = os.WriteFile(templatePath, []byte("Template from disk"), 0o644)
+	assert.NoError(t, err)
+
+	opts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
+		Return([]byte(tempDir+"\n"), nil)
+	opts.Prompter.On("Select", "Choose a template", mock.Anything, []string{"PULL_REQUEST_TEMPLATE.md", "Start with a blank pull request"}).
+		Return(1, nil)
+	opts.Mock.On("AskOne", "", mock.Anything).Run(func(args mock.Arguments) {
+		contents := args.Get(1).(*string)
+		*contents = "Body from scratch"
+	}).Return(nil)
+
+	autoPrOpts := &AutoPROptions{}
+
+	err = getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "Body from scratch", autoPrOpts.BodyTemplate)
+	opts.Mock.AssertNotCalled(t, "ReadFile", templatePath)
+}
+
+func TestGetBodyTemplate_readFileError(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	tempDir := t.TempDir()
+	templatePath := filepath.Join(tempDir, ".github", "PULL_REQUEST_TEMPLATE.md")
+
+	err := os.MkdirAll(filepath.Dir(templatePath), 0o755)
+	assert.NoError(t, err)
+	err = os.WriteFile(templatePath, []byte("Template from disk"), 0o644)
+	assert.NoError(t, err)
+
+	opts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
+		Return([]byte(tempDir+"\n"), nil)
+	opts.Prompter.On("Select", "Choose a template", mock.Anything, []string{"PULL_REQUEST_TEMPLATE.md", "Start with a blank pull request"}).
+		Return(0, nil)
+	opts.Mock.On("ReadFile", templatePath).Return(&internal.TestFile{}, fmt.Errorf("permission denied"))
+
+	autoPrOpts := &AutoPROptions{}
+
+	err = getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.ErrorContains(t, err, "permission denied")
+}
+
+func TestGetBodyTemplate_askOneError(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	tempDir := t.TempDir()
+	templatePath := filepath.Join(tempDir, ".github", "PULL_REQUEST_TEMPLATE.md")
+
+	err := os.MkdirAll(filepath.Dir(templatePath), 0o755)
+	assert.NoError(t, err)
+	err = os.WriteFile(templatePath, []byte("Template from disk"), 0o644)
+	assert.NoError(t, err)
+
+	opts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
+		Return([]byte(tempDir+"\n"), nil)
+	opts.Prompter.On("Select", "Choose a template", mock.Anything, []string{"PULL_REQUEST_TEMPLATE.md", "Start with a blank pull request"}).
+		Return(0, nil)
+	opts.Mock.On("ReadFile", templatePath).Return(&internal.TestFile{
+		Contents: "Template from disk",
+	}, nil)
+	opts.Mock.On("AskOne", "Template from disk", mock.Anything).
+		Return(fmt.Errorf("editor crashed"))
+
+	autoPrOpts := &AutoPROptions{}
+
+	err = getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.ErrorContains(t, err, "editor crashed")
+}
+
+func TestCreateStash_noChanges(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Mock.On("GitExec", []string{"status", "--porcelain", "--untracked-files=all"}).
+		Return([]byte{}, nil)
+
+	stashRef, err := createStash(toActual(opts), "gh-codeowners:auto-pr:test")
+
+	assert.NoError(t, err)
+	assert.Empty(t, stashRef)
+	opts.Mock.AssertNotCalled(t, "GitExec", []string{"stash", "push", "--include-untracked", "-m", "gh-codeowners:auto-pr:test"})
+}
+
+func TestCreateStash_returnsCreatedRef(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Mock.On("GitExec", []string{"status", "--porcelain", "--untracked-files=all"}).
+		Return([]byte("?? new-file.txt\n"), nil)
+	opts.Mock.On("GitExec", []string{"stash", "push", "--include-untracked", "-m", "gh-codeowners:auto-pr:test"}).
+		Return([]byte{}, nil)
+	opts.Mock.On("GitExec", []string{"stash", "list", "--format=%gd\t%s"}).
+		Return([]byte("stash@{1}\tother-message\nstash@{0}\tgh-codeowners:auto-pr:test\n"), nil)
+
+	stashRef, err := createStash(toActual(opts), "gh-codeowners:auto-pr:test")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "stash@{0}", stashRef)
+}
+
+func TestCreateStash_errorsWhenCreatedRefMissing(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Mock.On("GitExec", []string{"status", "--porcelain", "--untracked-files=all"}).
+		Return([]byte("?? new-file.txt\n"), nil)
+	opts.Mock.On("GitExec", []string{"stash", "push", "--include-untracked", "-m", "gh-codeowners:auto-pr:test"}).
+		Return([]byte{}, nil)
+	opts.Mock.On("GitExec", []string{"stash", "list", "--format=%gd\t%s"}).
+		Return([]byte("stash@{0}\tother-message\n"), nil)
+
+	stashRef, err := createStash(toActual(opts), "gh-codeowners:auto-pr:test")
+
+	assert.Empty(t, stashRef)
+	assert.ErrorContains(t, err, "could not find created stash")
+}
+
+func TestApplyStash_usesTargetedIndexRestore(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	opts.Mock.On("GitExec", []string{"stash", "pop", "--index", "stash@{2}"}).
+		Return([]byte{}, nil)
+
+	err := applyStash(toActual(opts), "stash@{2}")
+
+	assert.NoError(t, err)
 }

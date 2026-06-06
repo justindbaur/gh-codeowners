@@ -104,7 +104,10 @@ func (plan *PullRequestPlan) MoveUnownedFiles(opts *RootCmdOptions) error {
 			}
 
 			for _, selectedIndex := range selectedOptions {
-				// All these should be a team name
+				// "Separate" is not a team – skip it for interactive staging
+				if selectedIndex >= len(teamNames) {
+					continue
+				}
 				selectedTeam := teamNames[selectedIndex]
 
 				existingValue, found := plan.InteractiveStageFiles[selectedTeam]
@@ -162,14 +165,50 @@ func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "auto-pr",
 		Aliases: []string{"pr"},
-		Short:   "Make many PR's from one changeset",
-		Long: `The commit, branch, and PR template file are all allowed to use a go template strings. Branches are required to
-use a template string that will result in a unique name amongst all teams if one is not given, this will append a incrementing
-number to the branch name. Template strings make use of go text/template using the '{{ .TeamId }}' syntax. In addtion to 'TeamId'
-you may use 'Number' which is an incrementing number for the number of PR's being created, 'Name' which is the team name with 
-common prefixes and suffixes removed, 'Files' which is a slice of the files being added to this PR, 'Promote' is replaced with
-a link to this tool. You can also invoke the '{{ .Input "my_value" }} function. This lets you prompt yourself for a value for
-each team.'`,
+		Short:   "Create one PR per CODEOWNERS team",
+		Long: `Create one pull request per CODEOWNERS team from the files in your working tree.
+
+The branch, commit title, and PR body all use Go text/template syntax. Like
+'gh --template' and Docker's '--format', templates are evaluated against a data
+object. In auto-pr, that object describes the team and files for the PR being
+created.
+
+Available template values:
+  .TeamId   Full CODEOWNERS owner, such as @org/platform
+  .Name     Team name shortened by removing common prefixes and suffixes
+  .Number   1-based PR number for this auto-pr run
+  .Files    Files included in this PR
+  .Promote  Link back to this tool
+
+Available template function:
+  .Input "Label"
+    Prompt for a value while generating a PR. The answer is cached per team, so
+    you can reuse it within the branch, commit, and body templates.
+
+If --body is not provided, auto-pr looks for GitHub pull request templates in
+the repository, lets you choose one, and opens it for editing before creating
+PRs.
+
+Branch names must be unique. If multiple teams render the same branch name,
+auto-pr appends -<number> to later branches automatically.
+
+Tip: quote templates in your shell, for example '{{ .Name }}'.`,
+		Example: `  # Prompt for missing templates and choose a PR body template from the repo
+  gh-codeowners auto-pr
+
+  # Provide branch and commit templates explicitly
+  gh-codeowners auto-pr \
+    --branch 'codeowners/{{ .Name }}' \
+    --commit 'Split changes for {{ .TeamId }}'
+
+  # Reuse prompted input across templates
+  gh-codeowners auto-pr \
+    --branch 'feature/{{ .Input "Ticket" }}-{{ .Name }}' \
+    --commit '{{ .Input "Ticket" }}: changes for {{ .TeamId }}' \
+    --body 'Implements {{ .Input "Ticket" }} for {{ .TeamId }}'
+
+  # Put unowned files in their own PR
+  gh-codeowners auto-pr --unowned-files Separate`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			edittedFilesScanner, err := GetEdittedFilesScanner(cmd, opts)
 
@@ -288,16 +327,26 @@ each team.'`,
 	}
 
 	fl := cmd.Flags()
-	fl.StringVarP(&autoPROpts.CommitTemplate, "commit", "c", "", "The template string to use for each commit")
-	fl.StringVarP(&autoPROpts.BranchTemplate, "branch", "b", "", "The template string to use for each branch that is created")
-	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "What PR to put unowned files onto. `separate` to make their own PR.")
+	fl.StringVarP(&autoPROpts.CommitTemplate, "commit", "c", "", "Go template for each commit title and PR title")
+	fl.StringVarP(&autoPROpts.BranchTemplate, "branch", "b", "", "Go template for each branch name")
+	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "Team name or `Separate` for unowned files")
 	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
-	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "The template `file` to use when creating the templated team PR")
-	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "The remote the PR will be created on")
+	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "Go template for each PR body")
+	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "Git remote to push branches to before creating PRs")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		// TODO: Do early parse of CODEOWNERS file to help fill in option
+		// Do early read of codeowners file to find all relevant teams
+		teams, err := GetCodeownerTeams(cmd, opts, toComplete)
+
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveError
+		}
+
+		return append(teams, "Separate"), cobra.ShellCompDirectiveDefault
+	})
+
+	_ = cmd.RegisterFlagCompletionFunc("remote", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveError
 	})
 
@@ -321,10 +370,9 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		teamBranch = fmt.Sprintf("%s-%d", teamBranch, data.Number)
 	}
 
-	// Track branch
-	*checkedOutBranches = append(*checkedOutBranches, teamBranch)
-
 	checkoutArgs := []string{"checkout", "-b", teamBranch}
+	localBranchCreated := false
+	commitCreated := false
 
 	// Checkout
 	checkoutOutput, err := opts.GitExec(checkoutArgs...)
@@ -337,6 +385,11 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		cmd.ErrOrStderr().Write(checkoutOutput)
 		return fmt.Errorf("error checking out branch '%s': %v", teamBranch, err)
 	}
+	localBranchCreated = true
+
+	// Track branch only after checkout succeeds so failed branches do not pollute
+	// the uniqueness check for later teams in this run.
+	*checkedOutBranches = append(*checkedOutBranches, teamBranch)
 
 	// Stage files for this team
 	addOutput, err := opts.GitExec(append([]string{"add"}, data.Files...)...)
@@ -346,14 +399,20 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		// 1.
 		cmd.Println("Error doing git add operation")
 		cmd.ErrOrStderr().Write(addOutput)
-		return fmt.Errorf("problem adding files: %v", err)
+		return withRecoveryError(
+			fmt.Errorf("problem adding files: %v", err),
+			recoverFromPreCommitFailure(cmd, opts, teamBranch, localBranchCreated),
+		)
 	}
 
 	// Possibly do interactive staging
 	err = runInteractiveStaging(data.TeamId)
 
 	if err != nil {
-		return fmt.Errorf("issue doing interactive staging: %v", err)
+		return withRecoveryError(
+			fmt.Errorf("issue doing interactive staging: %v", err),
+			recoverFromPreCommitFailure(cmd, opts, teamBranch, localBranchCreated),
+		)
 	}
 
 	teamCommit, err := executeToString("Commit Template", prOpts.CommitTemplate, data)
@@ -373,8 +432,12 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		// 1.
 		cmd.Println("Error doing git commit operation")
 		cmd.ErrOrStderr().Write(commitOutput)
-		return fmt.Errorf("problem committing code for team '%s': %v", data.TeamId, err)
+		return withRecoveryError(
+			fmt.Errorf("problem committing code for team '%s': %v", data.TeamId, err),
+			recoverFromPreCommitFailure(cmd, opts, teamBranch, localBranchCreated),
+		)
 	}
+	commitCreated = true
 
 	// Push branch
 	pushArgs := []string{"push", "--set-upstream", prOpts.RemoteName, teamBranch}
@@ -387,7 +450,10 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		cmd.Printf("Error doing git push operation: %v\n", pushArgs)
 		cmd.Println(err)
 		cmd.ErrOrStderr().Write(pushOutput)
-		return fmt.Errorf("problem pushing to remote")
+		return withRecoveryError(
+			fmt.Errorf("problem pushing to remote; committed changes were left on branch '%s'", teamBranch),
+			recoverFromPostCommitFailure(cmd, opts, teamBranch, localBranchCreated, commitCreated),
+		)
 	}
 
 	file, err := os.CreateTemp(os.TempDir(), "team_pr_body")
@@ -429,13 +495,16 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		cmd.Printf("Problem creating PR with gh CLI: %v\n", args)
 		cmd.OutOrStdout().Write(stdOut.Bytes())
 		cmd.ErrOrStderr().Write(stdErr.Bytes())
-		return fmt.Errorf("error creating PR with GitHub CLI: %v", err)
+		return withRecoveryError(
+			fmt.Errorf("error creating PR with GitHub CLI: %v; branch '%s' was left in place", err, teamBranch),
+			recoverFromPostCommitFailure(cmd, opts, teamBranch, localBranchCreated, commitCreated),
+		)
 	}
 
 	// Stdout should be a url to the PR
 	cmd.Printf("PR for %s: %s", data.TeamId, stdOut.String())
 
-	stashed, err := createStash(opts)
+	stashRef, err := createStash(opts, fmt.Sprintf("gh-codeowners:auto-pr:%s", teamBranch))
 
 	if err != nil {
 		cmd.Println("Failed to create stash")
@@ -452,15 +521,76 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		return fmt.Errorf("error trying to checkout base branch: %v", err)
 	}
 
-	if !stashed {
+	if stashRef == "" {
 		return nil
 	}
 
-	err = applyStash(opts)
+	err = applyStash(opts, stashRef)
 
 	if err != nil {
 		cmd.Println("Failed to apply stash")
-		return err
+		return fmt.Errorf("failed to apply stash %s: %v", stashRef, err)
+	}
+
+	return nil
+}
+
+func withRecoveryError(originalErr, recoveryErr error) error {
+	if originalErr == nil {
+		return recoveryErr
+	}
+
+	if recoveryErr == nil {
+		return originalErr
+	}
+
+	return fmt.Errorf("%w; recovery failed: %v", originalErr, recoveryErr)
+}
+
+func recoverFromPreCommitFailure(cmd *cobra.Command, opts *RootCmdOptions, teamBranch string, localBranchCreated bool) error {
+	if !localBranchCreated {
+		return nil
+	}
+
+	var recoveryErr error
+
+	unstageOutput, err := opts.GitExec("restore", "--staged", ".")
+	if err != nil {
+		cmd.Println("Could not unstage files while recovering")
+		cmd.ErrOrStderr().Write(unstageOutput)
+		recoveryErr = fmt.Errorf("could not unstage files: %v", err)
+	}
+
+	checkoutErr := checkoutPreviousBranch(cmd, opts)
+	recoveryErr = withRecoveryError(recoveryErr, checkoutErr)
+	if checkoutErr != nil {
+		return recoveryErr
+	}
+
+	deleteOutput, err := opts.GitExec("branch", "-D", teamBranch)
+	if err != nil {
+		cmd.Printf("Could not delete recovery branch '%s'\n", teamBranch)
+		cmd.ErrOrStderr().Write(deleteOutput)
+		return withRecoveryError(recoveryErr, fmt.Errorf("could not delete recovery branch '%s': %v", teamBranch, err))
+	}
+
+	return recoveryErr
+}
+
+func recoverFromPostCommitFailure(cmd *cobra.Command, opts *RootCmdOptions, teamBranch string, localBranchCreated, commitCreated bool) error {
+	if !localBranchCreated || !commitCreated {
+		return nil
+	}
+
+	return checkoutPreviousBranch(cmd, opts)
+}
+
+func checkoutPreviousBranch(cmd *cobra.Command, opts *RootCmdOptions) error {
+	checkoutOutput, err := opts.GitExec("checkout", "-")
+	if err != nil {
+		cmd.Println("Could not checkout last branch")
+		cmd.ErrOrStderr().Write(checkoutOutput)
+		return fmt.Errorf("error trying to checkout base branch: %v", err)
 	}
 
 	return nil
@@ -648,20 +778,42 @@ func buildShortNames(teams []string) map[string]string {
 	return output
 }
 
-func createStash(opts *RootCmdOptions) (bool, error) {
-	// TODO: Make smarter with a custom message
-	stashOutput, err := opts.GitExec("stash", "push")
-
-	if err == nil && string(stashOutput) == "No local changes to save\n" {
-		return false, err
+func createStash(opts *RootCmdOptions, stashMessage string) (string, error) {
+	statusOutput, err := opts.GitExec("status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return "", err
 	}
 
-	return err == nil, err
+	if len(statusOutput) == 0 {
+		return "", nil
+	}
+
+	_, err = opts.GitExec("stash", "push", "--include-untracked", "-m", stashMessage)
+	if err != nil {
+		return "", err
+	}
+
+	stashListOutput, err := opts.GitExec("stash", "list", "--format=%gd\t%s")
+	if err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(stashListOutput)), "\n") {
+		if line == "" {
+			continue
+		}
+
+		ref, message, found := strings.Cut(line, "\t")
+		if found && strings.Contains(message, stashMessage) {
+			return ref, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find created stash '%s'", stashMessage)
 }
 
-func applyStash(opts *RootCmdOptions) error {
-	// TODO: Make smarter and apply the stash this program creates by name
-	_, err := opts.GitExec("stash", "pop")
+func applyStash(opts *RootCmdOptions, stashRef string) error {
+	_, err := opts.GitExec("stash", "pop", "--index", stashRef)
 
 	return err
 }

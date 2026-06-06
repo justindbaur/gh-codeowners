@@ -114,14 +114,51 @@ func TestMainCoreAutoPR(t *testing.T) {
 		"--show-toplevel"}).Return(fmt.Appendf(nil, "%s\n", tempDir), nil)
 
 	testOpts.Mock.On("GitExec", []string{
+		"status",
+		"--porcelain",
+		"--untracked-files=all",
+	}).Return([]byte("?? remaining.txt\n"), nil).Once()
+
+	testOpts.Mock.On("GitExec", []string{
 		"stash",
 		"push",
+		"--include-untracked",
+		"-m",
+		"gh-codeowners:auto-pr:branch-one",
 	}).Return([]byte{}, nil)
 
 	testOpts.Mock.On("GitExec", []string{
 		"stash",
+		"list",
+		"--format=%gd\t%s",
+	}).Return([]byte("stash@{0}\tgh-codeowners:auto-pr:branch-one\n"), nil).Once()
+
+	testOpts.Mock.On("GitExec", []string{
+		"stash",
 		"pop",
+		"--index",
+		"stash@{0}",
+	}).Return([]byte{}, nil).Twice()
+
+	testOpts.Mock.On("GitExec", []string{
+		"stash",
+		"push",
+		"--include-untracked",
+		"-m",
+		"gh-codeowners:auto-pr:branch-two",
 	}).Return([]byte{}, nil)
+
+	testOpts.Mock.On("GitExec", []string{
+		"status",
+		"--porcelain",
+		"--untracked-files=all",
+	}).Return([]byte("?? remaining.txt\n"), nil).Once()
+
+	testOpts.Mock.On("GitExec", []string{
+		"stash",
+		"list",
+		"--format=%gd\t%s",
+	}).Return([]byte("stash@{0}\tgh-codeowners:auto-pr:branch-two\n"), nil).Once()
 
 	testOpts.Mock.On("ReadFile", "./.github/PULL_REQUEST_TEMPLATE.md").Return(&internal.TestFile{
 		Contents: "My PR template!",
@@ -187,6 +224,10 @@ func TestMainCoreAutoPR_help(t *testing.T) {
 	assert.NoError(t, err)
 	helpOutput := opts.Out.String()
 	assert.NotEmpty(t, helpOutput)
+	assert.Contains(t, helpOutput, "Available template values:")
+	assert.Contains(t, helpOutput, `.Input "Label"`)
+	assert.Contains(t, helpOutput, "Examples:")
+	assert.Contains(t, helpOutput, "--branch 'codeowners/{{ .Name }}'")
 }
 
 func TestMainCoreAutoPR_helpLong(t *testing.T) {
@@ -197,6 +238,8 @@ func TestMainCoreAutoPR_helpLong(t *testing.T) {
 	assert.NoError(t, err)
 	helpOutput := opts.Out.String()
 	assert.NotEmpty(t, helpOutput)
+	assert.Contains(t, helpOutput, "Go template for each PR body")
+	assert.Contains(t, helpOutput, "Team name or Separate for unowned files")
 }
 
 func setupAutoPRTest(codeownersFile string, workingTree string) *internal.TestRootCmdOptions {
@@ -284,6 +327,8 @@ func TestMain(t *testing.T) {
 		preMock      func(m *mock.Mock)
 		promptStubs  func(*internal.MockPrompter)
 		assertOut    func(t *testing.T, out string)
+		assertErr    func(t *testing.T, err error)
+		assertRepo   func(t *testing.T, testDir string, gitBin string)
 	}{
 		{
 			name:        "Simple Report",
@@ -310,6 +355,111 @@ func TestMain(t *testing.T) {
 			},
 			assertOut: func(t *testing.T, out string) {
 				assert.Equal(t, "@my-org/my-team: 1\n", out)
+			},
+		},
+		{
+			name:        "Report with multiple teams",
+			args:        []string{"report"},
+			expectedErr: "",
+			promptStubs: func(m *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.go @my-org/backend\n*.js @my-org/frontend\n",
+				},
+				{name: "main.go", contents: "package main\n"},
+				{name: "app.js", contents: "console.log('hi');\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "main.go", contents: "package main // updated\n"},
+				{name: "app.js", contents: "console.log('updated');\n"},
+			},
+			assertOut: func(t *testing.T, out string) {
+				assert.Contains(t, out, "@my-org/backend: 1\n")
+				assert.Contains(t, out, "@my-org/frontend: 1\n")
+			},
+		},
+		{
+			name:        "Report with unowned files",
+			args:        []string{"report"},
+			expectedErr: "",
+			promptStubs: func(m *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.go @my-org/backend\n",
+				},
+				{name: "main.go", contents: "package main\n"},
+				{name: "README.md", contents: "# Readme\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "main.go", contents: "package main // updated\n"},
+				{name: "README.md", contents: "# Updated\n"},
+			},
+			assertOut: func(t *testing.T, out string) {
+				assert.Contains(t, out, "@my-org/backend: 1\n")
+				assert.Contains(t, out, "Files that are unowned: 1\n")
+			},
+		},
+		{
+			name:        "Stage multiple files for a team",
+			args:        []string{"stage", "@my-org/backend"},
+			expectedErr: "",
+			promptStubs: func(m *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.go @my-org/backend\n",
+				},
+				{name: "main.go", contents: "package main\n"},
+				{name: "server.go", contents: "package main\n"},
+				{name: "app.js", contents: "console.log();\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "main.go", contents: "package main // updated\n"},
+				{name: "server.go", contents: "package server // updated\n"},
+				{name: "app.js", contents: "console.log('updated');\n"},
+			},
+			assertOut: func(t *testing.T, out string) {
+				assert.Contains(t, out, "Staged: main.go\n")
+				assert.Contains(t, out, "Staged: server.go\n")
+				assert.NotContains(t, out, "app.js")
+			},
+		},
+		{
+			name:        "Stage with no matching team returns error",
+			args:        []string{"stage", "@my-org/nonexistent"},
+			promptStubs: func(m *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.go @my-org/backend\n",
+				},
+				{name: "main.go", contents: "package main\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "main.go", contents: "package main // updated\n"},
+			},
+			assertErr: func(t *testing.T, err error) {
+				assert.ErrorContains(t, err, "did not find any files owned by '@my-org/nonexistent'")
+			},
+		},
+		{
+			name:        "Auto-PR fails when only one team would receive a PR",
+			args:        []string{"auto-pr", "--commit", "commit for {{ .TeamId }}", "--branch", "branch/{{ .TeamId }}"},
+			promptStubs: func(m *internal.MockPrompter) {},
+			initialFiles: []TestFile{
+				{
+					name:     ".github/CODEOWNERS",
+					contents: "*.go @my-org/backend\n",
+				},
+				{name: "main.go", contents: "package main\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "main.go", contents: "package main // updated\n"},
+			},
+			assertErr: func(t *testing.T, err error) {
+				assert.ErrorContains(t, err, "only one PR would be made")
 			},
 		},
 		{
@@ -386,6 +536,96 @@ func TestMain(t *testing.T) {
 				}).Once().Return(nil)
 			},
 		},
+		{
+			name: "Auto PR add failure recovers back to base branch",
+			args: []string{"auto-pr", "--branch", "branch/{{ .Name }}", "--commit", "My Commit {{ .Name }}"},
+			initialFiles: []TestFile{
+				{name: ".github/CODEOWNERS", contents: "one/ @my-org/one\ntwo/ @my-org/two\n"},
+				{name: "one/file.txt", contents: "one old\n"},
+				{name: "two/file.txt", contents: "two old\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "one/file.txt", contents: "one new\n"},
+				{name: "two/file.txt", contents: "two new\n"},
+			},
+			preMock: func(m *mock.Mock) {
+				m.On("GitExec", mock.MatchedBy(func(args []string) bool {
+					return len(args) >= 1 && args[0] == "add"
+				})).Once().Return([]byte{}, fmt.Errorf("permission denied"))
+			},
+			assertErr: func(t *testing.T, err error) {
+				assert.ErrorContains(t, err, "problem adding files")
+			},
+			assertRepo: func(t *testing.T, testDir string, gitBin string) {
+				currentBranch := strings.TrimSpace(mustGitOutput(t, testDir, gitBin, "branch", "--show-current"))
+				assert.NotEqual(t, "branch/one", currentBranch)
+				assert.NotEqual(t, "branch/two", currentBranch)
+				branches := mustGitOutput(t, testDir, gitBin, "branch", "--list")
+				assert.NotContains(t, branches, "branch/one")
+				assert.NotContains(t, branches, "branch/two")
+				status := mustGitOutput(t, testDir, gitBin, "status", "--short")
+				assert.Contains(t, status, " M one/file.txt")
+				assert.Contains(t, status, " M two/file.txt")
+			},
+		},
+		{
+			name: "Auto PR push failure keeps local recovery branch",
+			args: []string{"auto-pr", "--branch", "branch/{{ .Name }}", "--commit", "My Commit {{ .Name }}"},
+			initialFiles: []TestFile{
+				{name: ".github/CODEOWNERS", contents: "one/ @my-org/one\ntwo/ @my-org/two\n"},
+				{name: "one/file.txt", contents: "one old\n"},
+				{name: "two/file.txt", contents: "two old\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "one/file.txt", contents: "one new\n"},
+				{name: "two/file.txt", contents: "two new\n"},
+			},
+			preMock: func(m *mock.Mock) {
+				m.On("GitExec", mock.MatchedBy(func(args []string) bool {
+					return len(args) == 4 && args[0] == "push" && args[1] == "--set-upstream" && args[2] == "origin"
+				})).Once().Return([]byte{}, fmt.Errorf("remote rejected"))
+			},
+			assertErr: func(t *testing.T, err error) {
+				assert.ErrorContains(t, err, "problem pushing to remote")
+				assert.ErrorContains(t, err, "committed changes were left on branch")
+			},
+			assertRepo: func(t *testing.T, testDir string, gitBin string) {
+				currentBranch := strings.TrimSpace(mustGitOutput(t, testDir, gitBin, "branch", "--show-current"))
+				assert.NotEqual(t, "branch/one", currentBranch)
+				assert.NotEqual(t, "branch/two", currentBranch)
+				branches := mustGitOutput(t, testDir, gitBin, "branch", "--list")
+				assert.True(t, strings.Contains(branches, "branch/one") || strings.Contains(branches, "branch/two"))
+			},
+		},
+		{
+			name: "Auto PR gh failure keeps local recovery branch",
+			args: []string{"auto-pr", "--branch", "branch/{{ .Name }}", "--commit", "My Commit {{ .Name }}"},
+			initialFiles: []TestFile{
+				{name: ".github/CODEOWNERS", contents: "one/ @my-org/one\ntwo/ @my-org/two\n"},
+				{name: "one/file.txt", contents: "one old\n"},
+				{name: "two/file.txt", contents: "two old\n"},
+			},
+			updatedFiles: []TestFile{
+				{name: "one/file.txt", contents: "one new\n"},
+				{name: "two/file.txt", contents: "two new\n"},
+			},
+			preMock: func(m *mock.Mock) {
+				m.On("GhExec", mock.MatchedBy(func(args []string) bool {
+					return len(args) >= 2 && args[0] == "pr" && args[1] == "new"
+				})).Once().Return(*bytes.NewBufferString(""), *bytes.NewBufferString("rate limit"), fmt.Errorf("gh failed"))
+			},
+			assertErr: func(t *testing.T, err error) {
+				assert.ErrorContains(t, err, "error creating PR with GitHub CLI")
+				assert.ErrorContains(t, err, "was left in place")
+			},
+			assertRepo: func(t *testing.T, testDir string, gitBin string) {
+				currentBranch := strings.TrimSpace(mustGitOutput(t, testDir, gitBin, "branch", "--show-current"))
+				assert.NotEqual(t, "branch/one", currentBranch)
+				assert.NotEqual(t, "branch/two", currentBranch)
+				branches := mustGitOutput(t, testDir, gitBin, "branch", "--list")
+				assert.True(t, strings.Contains(branches, "branch/one") || strings.Contains(branches, "branch/two"))
+			},
+		},
 	}
 
 	// TODO: Do global setup
@@ -425,11 +665,6 @@ func TestMain(t *testing.T) {
 			}
 
 			testMock := &mock.Mock{}
-
-			// We won't have an actual remote to push to
-			testMock.On("GitExec", mock.MatchedBy(func(args []string) bool {
-				return len(args) == 4 && args[0] == "push" && args[1] == "--set-upstream" && args[2] == "origin"
-			})).Return([]byte{}, nil)
 
 			stdout := NewTestWriter(t, "out")
 			stderr := NewTestWriter(t, "err")
@@ -485,6 +720,11 @@ func TestMain(t *testing.T) {
 					return "origin", nil
 				},
 				GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
+					if customIsMethodCallable(testMock, "GhExec", arg) {
+						args := testMock.MethodCalled("GhExec", arg)
+						return args.Get(0).(bytes.Buffer), args.Get(1).(bytes.Buffer), args.Error(2)
+					}
+
 					if len(arg) == 8 && arg[0] == "pr" && arg[1] == "new" {
 						t.Logf("GhExec: %s", arg)
 						return *bytes.NewBufferString("https://github.com/fake-org/fake-repo/pulls/1"), *bytes.NewBufferString(""), nil
@@ -499,18 +739,42 @@ func TestMain(t *testing.T) {
 				tt.preMock(testMock)
 			}
 
-			err = mainCore(opts, tt.args)
-			if tt.expectedErr == "" {
-				assert.NoError(t, err)
+			// We won't have an actual remote to push to
+			testMock.On("GitExec", mock.MatchedBy(func(args []string) bool {
+				return len(args) == 4 && args[0] == "push" && args[1] == "--set-upstream" && args[2] == "origin"
+			})).Return([]byte{}, nil)
 
-				if tt.assertOut != nil {
-					tt.assertOut(t, stdout.buf.String())
-				}
+			err = mainCore(opts, tt.args)
+			if tt.assertErr != nil {
+				tt.assertErr(t, err)
+			} else if tt.expectedErr == "" {
+				assert.NoError(t, err)
 			} else {
 				assert.Equal(t, tt.expectedErr, err)
 			}
+
+			if tt.assertOut != nil {
+				tt.assertOut(t, stdout.buf.String())
+			}
+
+			if tt.assertRepo != nil {
+				tt.assertRepo(t, testDir, gitBin)
+			}
 		})
 	}
+}
+
+func mustGitOutput(t *testing.T, testDir string, gitBin string, arg ...string) string {
+	t.Helper()
+
+	cmd := exec.Command(gitBin, arg...)
+	cmd.Dir = testDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", arg, err, string(output))
+	}
+
+	return string(output)
 }
 
 // Ref: https://github.com/stretchr/testify/issues/1712

@@ -29,6 +29,24 @@ func GetCodeowners(cmd *cobra.Command, opts *RootCmdOptions) (*codeowners.Codeow
 	return nil, fmt.Errorf("could not locate a CODEOWNERS file")
 }
 
+func GetCodeownerTeams(cmd *cobra.Command, opts *RootCmdOptions, query string) ([]string, error) {
+	// TODO: Use flag maybe
+	for _, location := range possibleCodeownersLocations {
+		file, err := opts.ReadFile(location)
+
+		if err != nil {
+			// Not found in that location try the other ones
+			continue
+		}
+
+		defer file.Close()
+
+		return codeowners.ReadTeams(file.Reader(), query), nil
+	}
+
+	return nil, fmt.Errorf("could not locate a CODEOWNERS file")
+}
+
 func GetEdittedFilesScanner(cmd *cobra.Command, opts *RootCmdOptions) (*bufio.Scanner, error) {
 	// TODO: Use flag maybe
 	diffOutput, err := opts.GitExec("status", "--untracked-files=all", "--null")

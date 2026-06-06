@@ -1,4 +1,4 @@
 /gh-codeowners
 /gh-codeowners.exe
-coverage.out
+*.out
 coverage.html
