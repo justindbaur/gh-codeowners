@@ -282,8 +282,11 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 			// Track checked out branches so we can help "unique-ify" it for them
 			checkedOutBranches := []string{}
 
-			// TODO: Do this loop with some sort that makes it do it the same way each time
-			for team, files := range prPlan.TeamFiles {
+			teams := slices.Collect(maps.Keys(prPlan.TeamFiles))
+			sort.Strings(teams)
+
+			for _, team := range teams {
+				files := prPlan.TeamFiles[team]
 				err = createPullRequest(cmd, &checkedOutBranches, autoPROpts, opts, &TemplateData{
 					Number:     number,
 					TeamId:     team,

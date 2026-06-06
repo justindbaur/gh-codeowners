@@ -640,6 +640,8 @@ func TestMain(t *testing.T) {
 			// I personally use a signing key based gpg signature and this breaks being able to run this test
 			// automatically, so I turn it off just for this repo
 			execGit(t, "config", "--local", "commit.gpgsign", "false")
+			execGit(t, "config", "--local", "user.name", "gh-codeowners test")
+			execGit(t, "config", "--local", "user.email", "gh-codeowners@example.com")
 
 			if tt.initialFiles != nil {
 				for _, file := range tt.initialFiles {
