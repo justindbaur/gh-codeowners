@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -75,7 +76,7 @@ func FromReader(reader io.Reader) (*Codeowners, error) {
 		if startOfComment == -1 {
 			owners = splitLine[1:]
 		} else {
-			owners = splitLine[1:startOfComment]
+			owners = splitLine[1 : 1+startOfComment]
 		}
 
 		ownerEntries = append(ownerEntries, OwnerEntry{file: splitLine[0], owners: owners, matcher: *regex})
@@ -83,6 +84,54 @@ func FromReader(reader io.Reader) (*Codeowners, error) {
 
 	slices.Reverse(ownerEntries)
 	return &Codeowners{entries: ownerEntries}, nil
+}
+
+func ReadTeams(reader io.Reader, query string) []string {
+	scanner := bufio.NewScanner(reader)
+
+	matchingOwners := map[string]struct{}{}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Skip comments
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// TODO: More whitespace allowed?
+		splitLine := strings.Split(line, " ")
+
+		if len(splitLine) == 0 {
+			continue
+		}
+
+		if len(splitLine) == 1 {
+			// fmt.Printf("Skipping line '%s' as it is improperly formatted.\n", line)
+			continue
+		}
+
+		// Handle inline comments
+		startOfComment := slices.IndexFunc(splitLine[1:], func(entry string) bool {
+			return strings.HasPrefix(entry, "#")
+		})
+
+		var owners []string
+
+		if startOfComment == -1 {
+			owners = splitLine[1:]
+		} else {
+			owners = splitLine[1 : 1+startOfComment]
+		}
+
+		for _, owner := range owners {
+			if !strings.HasPrefix(owner, query) {
+				continue
+			}
+			matchingOwners[owner] = struct{}{}
+		}
+	}
+
+	return slices.Collect(maps.Keys(matchingOwners))
 }
 
 // For more examples of using go-gh, see:
