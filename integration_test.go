@@ -394,6 +394,25 @@ func TestMainCoreAutoPR_draft(t *testing.T) {
 	}
 }
 
+func TestMainCoreAutoPR_labels(t *testing.T) {
+	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt")
+	opts.MockTemplateHole("@team-1", "Team Name", "one")
+	opts.MockTemplateHole("@team-2", "Team Name", "two")
+
+	err := mainCore(toActual(opts), []string{
+		"auto-pr", "--dry-run",
+		"--label", "bug",
+		"--label", "needs review",
+		"--commit", "commit-{{ .Name }}",
+		"--branch", "branch/{{ .Name }}",
+	})
+
+	assert.NoError(t, err)
+	for _, args := range filterCalls(opts, "GhExec") {
+		assert.Equal(t, []string{"--label", "bug", "--label", "needs review"}, args[len(args)-4:])
+	}
+}
+
 func TestMainCoreAutoPR_prAlias(t *testing.T) {
 	// The "pr" alias should behave the same as "auto-pr".
 	testOpts := internal.NewTestRootOpts()
@@ -452,6 +471,7 @@ func TestMainCoreAutoPR_emptyBranchTemplate(t *testing.T) {
 	testOpts.MockCodeowners([]string{"dir-1 @team-1", "dir-2 @team-2"})
 	testOpts.MockWorkingDirectory([]string{"dir-1/file.txt", "dir-2/file.txt"})
 
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 	testOpts.Prompter.On("Input", "What branch template do you want?", "").Return("", nil)
 
 	err := mainCore(toActual(testOpts), []string{"auto-pr", "--commit", "commit-{{ .Name }}"})
@@ -464,6 +484,7 @@ func TestMainCoreAutoPR_emptyCommitTemplate(t *testing.T) {
 	testOpts.MockCodeowners([]string{"dir-1 @team-1", "dir-2 @team-2"})
 	testOpts.MockWorkingDirectory([]string{"dir-1/file.txt", "dir-2/file.txt"})
 
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 	testOpts.Prompter.On("Input", "What branch template do you want?", "").Return("branch/{{ .Name }}", nil)
 	testOpts.Prompter.On("Input", "What commit/PR title template do you want?", "Files for {{ .TeamId }}").Return("", nil)
 
@@ -501,6 +522,7 @@ func newAutoPRBaseTest(t *testing.T, codeownersContent, workingTree string) *int
 	testOpts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
 		Return([]byte(tempDir+"\n"), nil)
 	testOpts.Mock.On("GetRemoteName").Return("origin", nil)
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 	return testOpts
 }
 
@@ -515,6 +537,7 @@ func newAutoPRBaseTestNoRemote(t *testing.T, codeownersContent, workingTree stri
 	tempDir := t.TempDir()
 	testOpts.Mock.On("GitExec", []string{"rev-parse", "--show-toplevel"}).
 		Return([]byte(tempDir+"\n"), nil)
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 	return testOpts
 }
 
@@ -750,6 +773,28 @@ func TestMainCoreAutoPR_separatePRForUnownedFiles(t *testing.T) {
 	assert.NoError(t, err)
 	// Two team PRs + one separate PR.
 	assert.Len(t, filterCalls(opts, "GhExec"), 3)
+}
+
+func TestMainCoreAutoPR_draftSeparate(t *testing.T) {
+	opts := setupAutoPRTest(
+		"dir-1 @team-1\ndir-2 @team-2\n",
+		"dir-1/file.txt\ndir-2/file.txt\nunowned.txt",
+	)
+	opts.Prompter.On("Select", "Choose where to put 1 unowned files", "", mock.Anything).
+		Return(2, nil)
+
+	err := mainCore(toActual(opts), []string{
+		"auto-pr", "--draft=seperate",
+		"--commit", "commit-{{ .Name }}",
+		"--branch", "branch/{{ .Name }}",
+	})
+
+	assert.NoError(t, err)
+	ghCalls := filterCalls(opts, "GhExec")
+	assert.Len(t, ghCalls, 3)
+	assert.Contains(t, ghCalls[0], "--draft=false")
+	assert.Contains(t, ghCalls[1], "--draft=false")
+	assert.Contains(t, ghCalls[2], "--draft=true")
 }
 
 func TestMainCoreAutoPR_gitStashPushError(t *testing.T) {

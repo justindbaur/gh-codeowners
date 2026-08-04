@@ -100,6 +100,7 @@ func TestMainCoreStage(t *testing.T) {
 func TestMainCoreAutoPR(t *testing.T) {
 	testOpts := internal.NewTestRootOpts()
 
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 	testOpts.Prompter.On("Input", "What branch template do you want?", "").Return("branch-{{ .Input \"Safe Name\"}}", nil)
 	testOpts.Prompter.On("Input", "What commit/PR title template do you want?", "Files for {{ .TeamId }}").Return("Do work for {{ .Input \"Safe Name\" }}", nil)
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
@@ -266,6 +267,7 @@ func setupAutoPRTest(codeownersFile string, workingTree string) *internal.TestRo
 		"--show-toplevel"}).Return(fmt.Appendf(nil, "%s\n", tempDir), nil)
 
 	testOpts.Prompter.On("Input", "Enter the path to the file containing your PR template", "./.github/PULL_REQUEST_TEMPLATE.md").Return("./.github/PULL_REQUEST_TEMPLATE.md", nil)
+	testOpts.Prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 
 	testOpts.Mock.On("AskOne", "", mock.Anything).Run(func(args mock.Arguments) {
 		contents := args.Get(1).(*string)
@@ -680,6 +682,7 @@ func TestMain(t *testing.T) {
 			if tt.promptStubs != nil {
 				tt.promptStubs(prompter)
 			}
+			prompter.On("Select", "How should the pull requests be created?", "Ready for review", mock.Anything).Return(0, nil)
 
 			// TODO: Make use genuine file system and git
 			// but not gh or stdout, prompter

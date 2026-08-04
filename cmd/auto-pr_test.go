@@ -93,6 +93,97 @@ func TestFindPrefixLength(t *testing.T) {
 	}
 }
 
+func TestAutoPROptionsDraftMode(t *testing.T) {
+	tests := []struct {
+		name              string
+		draftMode         string
+		wantTeamDraft     bool
+		wantSeparateDraft bool
+		wantError         string
+	}{
+		{
+			name:              "no drafts",
+			wantTeamDraft:     false,
+			wantSeparateDraft: false,
+		},
+		{
+			name:              "explicitly no drafts",
+			draftMode:         draftModeNone,
+			wantTeamDraft:     false,
+			wantSeparateDraft: false,
+		},
+		{
+			name:              "all drafts",
+			draftMode:         draftModeAll,
+			wantTeamDraft:     true,
+			wantSeparateDraft: true,
+		},
+		{
+			name:              "separate draft",
+			draftMode:         draftModeSeparate,
+			wantTeamDraft:     false,
+			wantSeparateDraft: true,
+		},
+		{
+			name:      "invalid mode",
+			draftMode: "team",
+			wantError: `invalid --draft value "team"; expected "all", "none", or "seperate"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &AutoPROptions{DraftMode: tt.draftMode}
+
+			if tt.wantError != "" {
+				assert.EqualError(t, opts.validateDraftMode(), tt.wantError)
+				return
+			}
+
+			assert.NoError(t, opts.validateDraftMode())
+			assert.Equal(t, tt.wantTeamDraft, opts.shouldCreateDraft(false))
+			assert.Equal(t, tt.wantSeparateDraft, opts.shouldCreateDraft(true))
+		})
+	}
+}
+
+func TestPromptForPRCreationMode(t *testing.T) {
+	tests := []struct {
+		name          string
+		selection     int
+		wantDraftMode string
+		wantDryRun    bool
+	}{
+		{name: "ready for review", selection: 0},
+		{name: "draft all", selection: 1, wantDraftMode: draftModeAll},
+		{name: "draft separate", selection: 2, wantDraftMode: draftModeSeparate},
+		{name: "dry run", selection: 3, wantDryRun: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := internal.NewTestRootOpts()
+			opts.Prompter.On(
+				"Select",
+				prCreationModePrompt,
+				"Ready for review",
+				[]string{
+					"Ready for review",
+					"Draft all pull requests",
+					"Draft only the seperate pull request",
+					"Dry run",
+				},
+			).Return(tt.selection, nil)
+			autoPROpts := &AutoPROptions{}
+
+			assert.NoError(t, promptForPRCreationMode(toActual(opts), autoPROpts))
+			assert.Equal(t, tt.wantDraftMode, autoPROpts.DraftMode)
+			assert.Equal(t, tt.wantDryRun, autoPROpts.DryRun)
+			opts.Prompter.AssertExpectations(t)
+		})
+	}
+}
+
 func TestGetBranchTemplate_repromptsForInvalidTemplate(t *testing.T) {
 	opts := internal.NewTestRootOpts()
 	invalidTemplate := "migrate-to-sdk-feature-service-to-{{ .Input team }}"
@@ -507,6 +598,7 @@ func TestPrintRetryAutoPRCommand_savesBodyTemplate(t *testing.T) {
 		BodyTemplate:    bodyTemplate,
 		RemoteName:      "origin",
 		ValidateCommand: "go test ./...",
+		Labels:          []string{"bug", "needs review"},
 	})
 
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
@@ -522,6 +614,26 @@ func TestPrintRetryAutoPRCommand_savesBodyTemplate(t *testing.T) {
 	assert.Contains(t, lines[2], "gh codeowners auto-pr")
 	assert.Contains(t, lines[2], "--body-file "+bodyTemplatePath)
 	assert.Contains(t, lines[2], "--validate 'go test ./...'")
+	assert.Contains(t, lines[2], "--label bug --label 'needs review'")
+}
+
+func TestPrintRetryAutoPRCommand_preservesDraftMode(t *testing.T) {
+	output := new(bytes.Buffer)
+	cmd := &cobra.Command{}
+	cmd.SetOut(output)
+
+	printRetryAutoPRCommand(cmd, &AutoPROptions{
+		BranchTemplate: "feature/{{ .Name }}",
+		CommitTemplate: "Changes for {{ .Name }}",
+		BodyTemplate:   "## Changes\n",
+		RemoteName:     "origin",
+		DraftMode:      draftModeSeparate,
+	})
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	bodyTemplatePath := strings.TrimPrefix(lines[0], "PR body template saved at ")
+	t.Cleanup(func() { os.Remove(bodyTemplatePath) })
+	assert.Contains(t, lines[2], "--draft seperate")
 }
 
 func TestGetBodyTemplate_noTemplatesFound(t *testing.T) {

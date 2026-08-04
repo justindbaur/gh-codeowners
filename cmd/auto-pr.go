@@ -151,15 +151,65 @@ func NewPullRequestPlan() *PullRequestPlan {
 }
 
 type AutoPROptions struct {
-	IsDraft          bool
+	DraftMode        string
 	CommitTemplate   string
 	BranchTemplate   string
 	RemoteName       string
 	BodyTemplate     string
 	BodyTemplateFile string
 	UnownedFiles     string
+	Labels           []string
 	DryRun           bool
 	ValidateCommand  string
+}
+
+const (
+	draftModeAll      = "all"
+	draftModeNone     = "none"
+	draftModeSeparate = "seperate"
+
+	prCreationModePrompt = "How should the pull requests be created?"
+)
+
+func (opts *AutoPROptions) shouldCreateDraft(isSeparate bool) bool {
+	return opts.DraftMode == draftModeAll || (opts.DraftMode == draftModeSeparate && isSeparate)
+}
+
+func (opts *AutoPROptions) validateDraftMode() error {
+	switch opts.DraftMode {
+	case "", draftModeAll, draftModeNone, draftModeSeparate:
+		return nil
+	default:
+		return fmt.Errorf("invalid --draft value %q; expected %q, %q, or %q", opts.DraftMode, draftModeAll, draftModeNone, draftModeSeparate)
+	}
+}
+
+func promptForPRCreationMode(opts *RootCmdOptions, autoPROpts *AutoPROptions) error {
+	options := []string{
+		"Ready for review",
+		"Draft all pull requests",
+		"Draft only the seperate pull request",
+		"Dry run",
+	}
+	selection, err := opts.Prompter.Select(prCreationModePrompt, options[0], options)
+	if err != nil {
+		return fmt.Errorf("could not select pull request creation mode: %w", err)
+	}
+
+	switch selection {
+	case 0:
+		return nil
+	case 1:
+		autoPROpts.DraftMode = draftModeAll
+	case 2:
+		autoPROpts.DraftMode = draftModeSeparate
+	case 3:
+		autoPROpts.DryRun = true
+	default:
+		return fmt.Errorf("invalid pull request creation mode selection: %d", selection)
+	}
+
+	return nil
 }
 
 func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
@@ -213,8 +263,14 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
   # Put unowned files in their own PR
   gh codeowners auto-pr --unowned-files Separate
 
+  # Create only the separate PR as a draft
+  gh codeowners auto-pr --draft=seperate
+
   # Validate each isolated staged changeset before committing it
   gh codeowners auto-pr --validate 'go test ./...'`,
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return autoPROpts.validateDraftMode()
+		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() {
 				if runErr != nil && autoPROpts.BranchTemplate != "" && autoPROpts.CommitTemplate != "" {
@@ -256,6 +312,12 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 
 			if len(prPlan.TeamFiles) == 1 {
 				return fmt.Errorf("only one PR would be made, it's recommended to just use `gh pr create`")
+			}
+
+			if !cmd.Flags().Changed("draft") && !cmd.Flags().Changed("dry-run") {
+				if err := promptForPRCreationMode(opts, autoPROpts); err != nil {
+					return err
+				}
 			}
 
 			err = getBranchTemplate(cmd, opts, autoPROpts)
@@ -307,7 +369,7 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 					Promote:    promotionString,
 					prompter:   opts.Prompter,
 					inputCache: map[string]string{},
-				}, func(t string) error {
+				}, false, func(t string) error {
 					return prPlan.DoInteractiveStagingIfNeeded(t, opts)
 				})
 
@@ -327,7 +389,7 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 					prompter:   opts.Prompter,
 					inputCache: map[string]string{},
 					Promote:    promotionString,
-				}, func(team string) error {
+				}, true, func(team string) error {
 					// Separate PR will never do interactive staging
 					return nil
 				})
@@ -345,11 +407,13 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 	fl.StringVarP(&autoPROpts.CommitTemplate, "commit", "c", "", "Go template for each commit title and PR title")
 	fl.StringVarP(&autoPROpts.BranchTemplate, "branch", "b", "", "Go template for each branch name")
 	fl.StringVarP(&autoPROpts.UnownedFiles, "unowned-files", "u", "", "Team name or `Separate` for unowned files")
-	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
+	fl.StringVarP(&autoPROpts.DraftMode, "draft", "d", "", "Mark `all` pull requests or the `seperate` PR as drafts; use `none` for no drafts")
+	fl.Lookup("draft").NoOptDefVal = draftModeAll
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
 	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "Go template for each PR body")
 	fl.StringVar(&autoPROpts.BodyTemplateFile, "body-file", "", "File containing the Go template for each PR body")
 	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "Git remote to push branches to before creating PRs")
+	fl.StringArrayVarP(&autoPROpts.Labels, "label", "l", nil, "Add a `label` to each pull request; may be repeated")
 	fl.StringVar(&autoPROpts.ValidateCommand, "validate", "", "Command to run after staging each pull request's files")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -370,7 +434,7 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 	return cmd
 }
 
-func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts *AutoPROptions, opts *RootCmdOptions, data *TemplateData, runInteractiveStaging func(team string) error) error {
+func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts *AutoPROptions, opts *RootCmdOptions, data *TemplateData, isSeparate bool, runInteractiveStaging func(team string) error) error {
 	cmd.Printf("Creating PR for team: %s\n", data.TeamId)
 
 	teamBranch, err := executeToString("Branch Template", prOpts.BranchTemplate, data)
@@ -513,8 +577,11 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 		file.Name(),
 		"--title",
 		teamCommit,
-		fmt.Sprintf("--draft=%t", prOpts.IsDraft),
+		fmt.Sprintf("--draft=%t", prOpts.shouldCreateDraft(isSeparate)),
 		fmt.Sprintf("--dry-run=%t", prOpts.DryRun),
+	}
+	for _, label := range prOpts.Labels {
+		args = append(args, "--label", label)
 	}
 
 	stdOut, stdErr, err := opts.GhExec(args...)
@@ -814,8 +881,11 @@ func printRetryAutoPRCommand(cmd *cobra.Command, prOpts *AutoPROptions) {
 	if prOpts.UnownedFiles != "" {
 		args = append(args, "--unowned-files", prOpts.UnownedFiles)
 	}
-	if prOpts.IsDraft {
-		args = append(args, "--draft")
+	for _, label := range prOpts.Labels {
+		args = append(args, "--label", label)
+	}
+	if prOpts.DraftMode != "" {
+		args = append(args, "--draft", prOpts.DraftMode)
 	}
 	if prOpts.DryRun {
 		args = append(args, "--dry-run")
