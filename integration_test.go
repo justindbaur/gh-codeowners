@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -359,6 +360,16 @@ func TestMainCoreAutoPR_stopsWhenValidationFails(t *testing.T) {
 
 	assert.ErrorContains(t, err, "validation command failed: tests failed")
 	assert.NotContains(t, filterCalls(opts, "GitExec"), []string{"commit", "--message", "commit-one"})
+	assert.Contains(t, opts.Out.String(), "Retry with:\n  gh codeowners auto-pr")
+
+	for _, line := range strings.Split(opts.Out.String(), "\n") {
+		const bodyTemplatePrefix = "PR body template saved at "
+		if strings.HasPrefix(line, bodyTemplatePrefix) {
+			assert.NoError(t, os.Remove(strings.TrimPrefix(line, bodyTemplatePrefix)))
+			return
+		}
+	}
+	t.Fatal("retry body template path was not printed")
 }
 
 func TestMainCoreAutoPR_draft(t *testing.T) {
@@ -857,6 +868,13 @@ func TestMainCoreAutoPR_stashPopError(t *testing.T) {
 func TestMainCoreAutoPR_invalidBranchTemplate(t *testing.T) {
 	testOpts := newAutoPRBaseTest(t, "dir-1 @team-1\ndir-2 @team-2\n", "dir-1/file.txt\ndir-2/file.txt")
 	testOpts.Mock.On("GitExec", mock.Anything).Return([]byte{}, nil)
+	testOpts.Prompter.On(
+		"Input",
+		mock.MatchedBy(func(prompt string) bool {
+			return strings.Contains(prompt, `function "invalid" not defined`)
+		}),
+		"{{ invalid template",
+	).Return("", fmt.Errorf("user cancelled"))
 
 	err := mainCore(toActual(testOpts), []string{
 		"auto-pr",
@@ -864,7 +882,7 @@ func TestMainCoreAutoPR_invalidBranchTemplate(t *testing.T) {
 		"--branch", "{{ invalid template",
 	})
 
-	assert.ErrorContains(t, err, "error while formatting branch template")
+	assert.ErrorContains(t, err, "could not correct invalid branch template")
 }
 
 func TestMainCoreAutoPR_templateInputPromptError(t *testing.T) {

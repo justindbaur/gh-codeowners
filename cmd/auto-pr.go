@@ -12,6 +12,7 @@ import (
 	"text/template"
 
 	"github.com/cli/cli/v2/pkg/githubtemplate"
+	"github.com/kballard/go-shellquote"
 	"github.com/spf13/cobra"
 )
 
@@ -150,14 +151,15 @@ func NewPullRequestPlan() *PullRequestPlan {
 }
 
 type AutoPROptions struct {
-	IsDraft         bool
-	CommitTemplate  string
-	BranchTemplate  string
-	RemoteName      string
-	BodyTemplate    string
-	UnownedFiles    string
-	DryRun          bool
-	ValidateCommand string
+	IsDraft          bool
+	CommitTemplate   string
+	BranchTemplate   string
+	RemoteName       string
+	BodyTemplate     string
+	BodyTemplateFile string
+	UnownedFiles     string
+	DryRun           bool
+	ValidateCommand  string
 }
 
 func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
@@ -195,25 +197,31 @@ auto-pr appends -<number> to later branches automatically.
 
 Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 		Example: `  # Prompt for missing templates and choose a PR body template from the repo
-  gh-codeowners auto-pr
+  gh codeowners auto-pr
 
   # Provide branch and commit templates explicitly
-  gh-codeowners auto-pr \
+  gh codeowners auto-pr \
     --branch 'codeowners/{{ .Name }}' \
     --commit 'Split changes for {{ .TeamId }}'
 
   # Reuse prompted input across templates
-  gh-codeowners auto-pr \
+  gh codeowners auto-pr \
     --branch 'feature/{{ .Input "Ticket" }}-{{ .Name }}' \
     --commit '{{ .Input "Ticket" }}: changes for {{ .TeamId }}' \
     --body 'Implements {{ .Input "Ticket" }} for {{ .TeamId }}'
 
   # Put unowned files in their own PR
-  gh-codeowners auto-pr --unowned-files Separate
+  gh codeowners auto-pr --unowned-files Separate
 
   # Validate each isolated staged changeset before committing it
-  gh-codeowners auto-pr --validate 'go test ./...'`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+  gh codeowners auto-pr --validate 'go test ./...'`,
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() {
+				if runErr != nil && autoPROpts.BranchTemplate != "" && autoPROpts.CommitTemplate != "" {
+					printRetryAutoPRCommand(cmd, autoPROpts)
+				}
+			}()
+
 			edittedFilesScanner, err := GetEdittedFilesScanner(cmd, opts)
 
 			if err != nil {
@@ -340,6 +348,7 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 	fl.BoolVarP(&autoPROpts.IsDraft, "draft", "d", false, "Mark the pull requests as drafts")
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
 	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "Go template for each PR body")
+	fl.StringVar(&autoPROpts.BodyTemplateFile, "body-file", "", "File containing the Go template for each PR body")
 	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "Git remote to push branches to before creating PRs")
 	fl.StringVar(&autoPROpts.ValidateCommand, "validate", "", "Command to run after staging each pull request's files")
 
@@ -631,7 +640,35 @@ func getBranchTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts 
 		autoPrOpts.BranchTemplate = templateString
 	}
 
+	templateString, err := correctInvalidTemplate(rootOpts, "branch", autoPrOpts.BranchTemplate)
+	if err != nil {
+		return err
+	}
+
+	autoPrOpts.BranchTemplate = templateString
 	return nil
+}
+
+func correctInvalidTemplate(rootOpts *RootCmdOptions, templateType, templateString string) (string, error) {
+	for {
+		_, err := template.New(templateType + " template").Parse(templateString)
+		if err == nil {
+			return templateString, nil
+		}
+
+		correctedTemplate, promptErr := rootOpts.Prompter.Input(
+			fmt.Sprintf("Invalid %s template: %v. Enter a corrected template", templateType, err),
+			templateString,
+		)
+		if promptErr != nil {
+			return "", fmt.Errorf("could not correct invalid %s template: %w", templateType, promptErr)
+		}
+		if correctedTemplate == "" {
+			return "", fmt.Errorf("%s template is required", templateType)
+		}
+
+		templateString = correctedTemplate
+	}
 }
 
 func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) error {
@@ -649,11 +686,34 @@ func getCommitTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts 
 		autoPrOpts.CommitTemplate = templateString
 	}
 
+	templateString, err := correctInvalidTemplate(rootOpts, "commit", autoPrOpts.CommitTemplate)
+	if err != nil {
+		return err
+	}
+
+	autoPrOpts.CommitTemplate = templateString
 	return nil
 }
 
 func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *AutoPROptions) error {
-	if !cmd.Flags().Changed("body") {
+	if cmd.Flags().Changed("body") && cmd.Flags().Changed("body-file") {
+		return fmt.Errorf("only one of --body and --body-file may be provided")
+	}
+
+	if cmd.Flags().Changed("body-file") {
+		templateFile, err := rootOpts.ReadFile(autoPrOpts.BodyTemplateFile)
+		if err != nil {
+			return fmt.Errorf("could not read body template file: %w", err)
+		}
+		defer templateFile.Close()
+
+		builder := new(strings.Builder)
+		if _, err := io.Copy(builder, templateFile.Reader()); err != nil {
+			return fmt.Errorf("could not read body template file: %w", err)
+		}
+
+		autoPrOpts.BodyTemplate = builder.String()
+	} else if !cmd.Flags().Changed("body") {
 		// Get body and place on autoPrOpts
 		topLevelDirBytes, err := rootOpts.GitExec("rev-parse", "--show-toplevel")
 
@@ -717,14 +777,62 @@ func getBodyTemplate(cmd *cobra.Command, rootOpts *RootCmdOptions, autoPrOpts *A
 		}
 	}
 
+	templateString, err := correctInvalidTemplate(rootOpts, "body", autoPrOpts.BodyTemplate)
+	if err != nil {
+		return err
+	}
+
+	autoPrOpts.BodyTemplate = templateString
 	return nil
+}
+
+func printRetryAutoPRCommand(cmd *cobra.Command, prOpts *AutoPROptions) {
+	bodyTemplateFile, err := os.CreateTemp("", "gh-codeowners-auto-pr-body-template-*.md")
+	if err != nil {
+		cmd.Printf("Could not save PR body template for retry: %v\n", err)
+		return
+	}
+
+	if _, err := bodyTemplateFile.WriteString(prOpts.BodyTemplate); err != nil {
+		bodyTemplateFile.Close()
+		cmd.Printf("Could not save PR body template for retry: %v\n", err)
+		return
+	}
+	if err := bodyTemplateFile.Close(); err != nil {
+		cmd.Printf("Could not save PR body template for retry: %v\n", err)
+		return
+	}
+
+	args := []string{
+		"codeowners",
+		"auto-pr",
+		"--branch", prOpts.BranchTemplate,
+		"--commit", prOpts.CommitTemplate,
+		"--body-file", bodyTemplateFile.Name(),
+		"--remote", prOpts.RemoteName,
+	}
+	if prOpts.UnownedFiles != "" {
+		args = append(args, "--unowned-files", prOpts.UnownedFiles)
+	}
+	if prOpts.IsDraft {
+		args = append(args, "--draft")
+	}
+	if prOpts.DryRun {
+		args = append(args, "--dry-run")
+	}
+	if prOpts.ValidateCommand != "" {
+		args = append(args, "--validate", prOpts.ValidateCommand)
+	}
+
+	cmd.Printf("PR body template saved at %s\n", bodyTemplateFile.Name())
+	cmd.Printf("Retry with:\n  %s\n", shellquote.Join(append([]string{"gh"}, args...)...))
 }
 
 func executeToString(name, templateText string, data *TemplateData) (string, error) {
 	t, err := template.New(fmt.Sprintf("%s: %s", name, data.Name)).Parse(templateText)
 
 	if err != nil {
-		return "", fmt.Errorf("failed to parse %s template for team %s", name, data.Name)
+		return "", fmt.Errorf("failed to parse %s template for team %s: %w", name, data.Name, err)
 	}
 
 	buf := new(bytes.Buffer)

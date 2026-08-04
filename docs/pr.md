@@ -46,3 +46,7 @@ Other data
 
 You can use as many or as few of these of as you'd like although the branch name is
 required to be unique amongst other teams. 
+
+Use `--body-file path/to/template.md` to load a PR body template from a file.
+This is useful when retrying a failed run: the retry command saves the original,
+unrendered body template to a temporary file and passes it with `--body-file`.

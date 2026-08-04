@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/justindbaur/gh-codeowners/internal"
@@ -88,6 +89,50 @@ func TestFindPrefixLength(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			actual := findPrefixLength(tt.values)
 			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestGetBranchTemplate_repromptsForInvalidTemplate(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	invalidTemplate := "migrate-to-sdk-feature-service-to-{{ .Input team }}"
+	opts.Prompter.On(
+		"Input",
+		mock.MatchedBy(func(prompt string) bool {
+			return strings.Contains(prompt, `function "team" not defined`)
+		}),
+		invalidTemplate,
+	).Return(`migrate-to-sdk-feature-service-to-{{ .Input "team" }}`, nil)
+
+	autoPrOpts := &AutoPROptions{BranchTemplate: invalidTemplate}
+	cmd := newCmdAutoPR(toActual(opts))
+	assert.NoError(t, cmd.Flags().Set("branch", invalidTemplate))
+
+	err := getBranchTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Equal(t, `migrate-to-sdk-feature-service-to-{{ .Input "team" }}`, autoPrOpts.BranchTemplate)
+	opts.Prompter.AssertExpectations(t)
+}
+
+func TestCorrectInvalidTemplate_repromptsForAllTemplateTypes(t *testing.T) {
+	for _, templateType := range []string{"commit", "body"} {
+		t.Run(templateType, func(t *testing.T) {
+			opts := internal.NewTestRootOpts()
+			opts.Prompter.On(
+				"Input",
+				mock.MatchedBy(func(prompt string) bool {
+					return strings.Contains(prompt, "Invalid "+templateType+" template") &&
+						strings.Contains(prompt, `function "invalid" not defined`)
+				}),
+				"{{ invalid template",
+			).Return(`{{ .Name }}`, nil)
+
+			templateString, err := correctInvalidTemplate(toActual(opts), templateType, "{{ invalid template")
+
+			assert.NoError(t, err)
+			assert.Equal(t, "{{ .Name }}", templateString)
+			opts.Prompter.AssertExpectations(t)
 		})
 	}
 }
@@ -413,6 +458,7 @@ func TestBuildShortNames_singleTeamPanics(t *testing.T) {
 func newBodyTemplateTestCmd() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("body", "", "")
+	cmd.Flags().String("body-file", "", "")
 	return cmd
 }
 
@@ -431,6 +477,51 @@ func TestGetBodyTemplate_skipsWhenBodyFlagProvided(t *testing.T) {
 	opts.Mock.AssertNotCalled(t, "GitExec", mock.Anything)
 	opts.Mock.AssertNotCalled(t, "AskOne", mock.Anything, mock.Anything)
 	opts.Prompter.AssertNotCalled(t, "Select", mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestGetBodyTemplate_readsBodyFile(t *testing.T) {
+	opts := internal.NewTestRootOpts()
+	cmd := newBodyTemplateTestCmd()
+	assert.NoError(t, cmd.Flags().Set("body-file", "pr-template.md"))
+	opts.Mock.On("ReadFile", "pr-template.md").Return(&internal.TestFile{
+		Contents: "Template for {{ .Name }}",
+	}, nil)
+
+	autoPrOpts := &AutoPROptions{BodyTemplateFile: "pr-template.md"}
+	err := getBodyTemplate(cmd, toActual(opts), autoPrOpts)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "Template for {{ .Name }}", autoPrOpts.BodyTemplate)
+	opts.Mock.AssertNotCalled(t, "GitExec", mock.Anything)
+}
+
+func TestPrintRetryAutoPRCommand_savesBodyTemplate(t *testing.T) {
+	output := new(bytes.Buffer)
+	cmd := &cobra.Command{}
+	cmd.SetOut(output)
+	bodyTemplate := "## Changes for {{ .Name }}\n"
+
+	printRetryAutoPRCommand(cmd, &AutoPROptions{
+		BranchTemplate:  "feature/{{ .Name }}",
+		CommitTemplate:  "Changes for {{ .Name }}",
+		BodyTemplate:    bodyTemplate,
+		RemoteName:      "origin",
+		ValidateCommand: "go test ./...",
+	})
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	assert.Len(t, lines, 3)
+	const bodyTemplatePrefix = "PR body template saved at "
+	assert.True(t, strings.HasPrefix(lines[0], bodyTemplatePrefix))
+	bodyTemplatePath := strings.TrimPrefix(lines[0], bodyTemplatePrefix)
+	t.Cleanup(func() { os.Remove(bodyTemplatePath) })
+
+	savedTemplate, err := os.ReadFile(bodyTemplatePath)
+	assert.NoError(t, err)
+	assert.Equal(t, bodyTemplate, string(savedTemplate))
+	assert.Contains(t, lines[2], "gh codeowners auto-pr")
+	assert.Contains(t, lines[2], "--body-file "+bodyTemplatePath)
+	assert.Contains(t, lines[2], "--validate 'go test ./...'")
 }
 
 func TestGetBodyTemplate_noTemplatesFound(t *testing.T) {
