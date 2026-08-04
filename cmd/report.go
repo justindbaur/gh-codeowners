@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,12 +55,19 @@ func newCmdReport(opts *RootCmdOptions) *cobra.Command {
 				}
 			}
 
-			for owner, ownedFiles := range singleOwnerReport {
-				if owner == "" {
-					cmd.Printf("Files that are unowned: %d\n", ownedFiles)
-				} else {
-					cmd.Printf("%s: %d\n", owner, ownedFiles)
+			owners := make([]string, 0, len(singleOwnerReport))
+			for owner := range singleOwnerReport {
+				if owner != "" {
+					owners = append(owners, owner)
 				}
+			}
+			sort.Strings(owners)
+
+			for _, owner := range owners {
+				cmd.Printf("%s: %d\n", owner, singleOwnerReport[owner])
+			}
+			if unownedFiles := singleOwnerReport[""]; unownedFiles > 0 {
+				cmd.Printf("Files that are unowned: %d\n", unownedFiles)
 			}
 			return nil
 		},

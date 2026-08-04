@@ -165,10 +165,7 @@ func TestMainCoreReport_mixedOwnedAndUnowned(t *testing.T) {
 	err := mainCore(toActual(testOpts), []string{"report"})
 
 	assert.NoError(t, err)
-	out := testOpts.Out.String()
-	assert.Contains(t, out, "@org/backend: 1\n")
-	assert.Contains(t, out, "@org/frontend: 1\n")
-	assert.Contains(t, out, "Files that are unowned: 2\n")
+	assert.Equal(t, "@org/backend: 1\n@org/frontend: 1\nFiles that are unowned: 2\n", testOpts.Out.String())
 }
 
 // ---------------------------------------------------------------------------
