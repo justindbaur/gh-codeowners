@@ -26,6 +26,7 @@ type RootCmdOptions struct {
 	ReadFile      func(filePath string) (File, error)
 	GitExec       func(arg ...string) ([]byte, error)
 	GitExecInt    func(arg ...string) error
+	RunCommand    func(command string) error
 	GhExec        func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error)
 	Prompter      Prompter
 	AskOne        func(templateContents string, contents any) error

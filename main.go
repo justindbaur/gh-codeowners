@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -57,6 +58,20 @@ func main() {
 			gitCmd.Stderr = os.Stderr
 
 			return gitCmd.Run()
+		},
+		RunCommand: func(command string) error {
+			var commandCmd *exec.Cmd
+			if runtime.GOOS == "windows" {
+				commandCmd = exec.Command("cmd.exe", "/C", command)
+			} else {
+				commandCmd = exec.Command("sh", "-c", command)
+			}
+
+			commandCmd.Stdin = os.Stdin
+			commandCmd.Stdout = os.Stdout
+			commandCmd.Stderr = os.Stderr
+
+			return commandCmd.Run()
 		},
 		GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
 			return gh.Exec(arg...)

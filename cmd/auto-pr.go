@@ -150,13 +150,14 @@ func NewPullRequestPlan() *PullRequestPlan {
 }
 
 type AutoPROptions struct {
-	IsDraft        bool
-	CommitTemplate string
-	BranchTemplate string
-	RemoteName     string
-	BodyTemplate   string
-	UnownedFiles   string
-	DryRun         bool
+	IsDraft         bool
+	CommitTemplate  string
+	BranchTemplate  string
+	RemoteName      string
+	BodyTemplate    string
+	UnownedFiles    string
+	DryRun          bool
+	ValidateCommand string
 }
 
 func newCmdAutoPR(opts *RootCmdOptions) *cobra.Command {
@@ -208,7 +209,10 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
     --body 'Implements {{ .Input "Ticket" }} for {{ .TeamId }}'
 
   # Put unowned files in their own PR
-  gh-codeowners auto-pr --unowned-files Separate`,
+  gh-codeowners auto-pr --unowned-files Separate
+
+  # Validate each isolated staged changeset before committing it
+  gh-codeowners auto-pr --validate 'go test ./...'`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			edittedFilesScanner, err := GetEdittedFilesScanner(cmd, opts)
 
@@ -337,6 +341,7 @@ Tip: quote templates in your shell, for example '{{ .Name }}'.`,
 	fl.BoolVar(&autoPROpts.DryRun, "dry-run", false, "Print details instead of creating the PR. May still push git changes.")
 	fl.StringVar(&autoPROpts.BodyTemplate, "body", "", "Go template for each PR body")
 	fl.StringVarP(&autoPROpts.RemoteName, "remote", "r", "", "Git remote to push branches to before creating PRs")
+	fl.StringVar(&autoPROpts.ValidateCommand, "validate", "", "Command to run after staging each pull request's files")
 
 	_ = cmd.RegisterFlagCompletionFunc("unowned-files", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// Do early read of codeowners file to find all relevant teams
@@ -416,6 +421,17 @@ func createPullRequest(cmd *cobra.Command, checkedOutBranches *[]string, prOpts 
 			fmt.Errorf("issue doing interactive staging: %v", err),
 			recoverFromPreCommitFailure(cmd, opts, teamBranch, localBranchCreated),
 		)
+	}
+
+	if prOpts.ValidateCommand != "" {
+		cmd.Printf("Validating staged changes for %s\n", data.TeamId)
+		err = opts.RunCommand(prOpts.ValidateCommand)
+		if err != nil {
+			return withRecoveryError(
+				fmt.Errorf("validation command failed: %w", err),
+				recoverFromPreCommitFailure(cmd, opts, teamBranch, localBranchCreated),
+			)
+		}
 	}
 
 	teamCommit, err := executeToString("Commit Template", prOpts.CommitTemplate, data)

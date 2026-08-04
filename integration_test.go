@@ -313,6 +313,54 @@ func TestMainCoreAutoPR_dryRun(t *testing.T) {
 	}
 }
 
+func TestMainCoreAutoPR_validatesEachStagedChangeset(t *testing.T) {
+	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt")
+	opts.MockTemplateHole("@team-1", "Team Name", "one")
+	opts.MockTemplateHole("@team-2", "Team Name", "two")
+	opts.Mock.On("RunCommand", "go test ./...").Return(nil).Twice()
+
+	err := mainCore(toActual(opts), []string{
+		"auto-pr",
+		"--commit", "commit-{{ .Name }}",
+		"--branch", "branch/{{ .Name }}",
+		"--validate", "go test ./...",
+	})
+
+	assert.NoError(t, err)
+
+	runCommandCount := 0
+	for commandIndex, commandCall := range opts.Mock.Calls {
+		if commandCall.Method != "RunCommand" {
+			continue
+		}
+
+		runCommandCount++
+		assert.Equal(t, "go test ./...", commandCall.Arguments.String(0))
+		assert.Greater(t, commandIndex, 0)
+		previousCall := opts.Mock.Calls[commandIndex-1]
+		assert.Equal(t, "GitExec", previousCall.Method)
+		assert.Equal(t, "add", previousCall.Arguments.Get(0).([]string)[0])
+	}
+	assert.Equal(t, 2, runCommandCount)
+}
+
+func TestMainCoreAutoPR_stopsWhenValidationFails(t *testing.T) {
+	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt")
+	opts.MockTemplateHole("@team-1", "Team Name", "one")
+	opts.MockTemplateHole("@team-2", "Team Name", "two")
+	opts.Mock.On("RunCommand", "go test ./...").Return(fmt.Errorf("tests failed")).Once()
+
+	err := mainCore(toActual(opts), []string{
+		"auto-pr",
+		"--commit", "commit-{{ .Name }}",
+		"--branch", "branch/{{ .Name }}",
+		"--validate", "go test ./...",
+	})
+
+	assert.ErrorContains(t, err, "validation command failed: tests failed")
+	assert.NotContains(t, filterCalls(opts, "GitExec"), []string{"commit", "--message", "commit-one"})
+}
+
 func TestMainCoreAutoPR_draft(t *testing.T) {
 	// With --draft, GhExec should be called with --draft=true.
 	opts := setupAutoPRTest("dir-1 @team-1\ndir-2 @team-2\n", "dir-1/test.txt\ndir-2/test.txt")

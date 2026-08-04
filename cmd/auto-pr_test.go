@@ -30,6 +30,10 @@ func toActual(testOpts *internal.TestRootCmdOptions) *RootCmdOptions {
 			args := testOpts.Mock.MethodCalled("GitExecInt", arg)
 			return args.Error(0)
 		},
+		RunCommand: func(command string) error {
+			args := testOpts.Mock.MethodCalled("RunCommand", command)
+			return args.Error(0)
+		},
 		GhExec: func(arg ...string) (stdout bytes.Buffer, stderr bytes.Buffer, err error) {
 			args := testOpts.Mock.MethodCalled("GhExec", arg)
 			return args.Get(0).(bytes.Buffer), args.Get(1).(bytes.Buffer), args.Error(2)

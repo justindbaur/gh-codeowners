@@ -21,3 +21,7 @@ Run `gh codeowners stage [team]` to stage all files for a given team.
 ### auto-pr
 
 Run `gh codeowners auto-pr` to run through an interactive shell for quickly creating PR's for multiple teams.
+Use `--validate '<command>'` to run a command after staging each isolated
+changeset and before committing it. Commands run with `sh -c` on Unix-like
+systems and `cmd.exe /C` on Windows. For example:
+`gh codeowners auto-pr --validate 'go test ./...'`.
