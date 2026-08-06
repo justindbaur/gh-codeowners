@@ -83,6 +83,44 @@ func TestMainCoreReport_multipleOwnersForFile(t *testing.T) {
 	assert.NotContains(t, out, "@org/team-b:")
 }
 
+func TestMainCoreReport_team(t *testing.T) {
+	testOpts := internal.NewTestRootOpts()
+
+	testOpts.MockCodeowners([]string{
+		"backend/ @org/backend",
+		"shared/ @org/backend @org/frontend",
+		"frontend/ @org/frontend",
+	})
+	testOpts.MockWorkingDirectory([]string{
+		"backend/server.go",
+		"shared/config.go",
+		"frontend/app.js",
+	})
+
+	err := mainCore(toActual(testOpts), []string{"report", "@org/backend"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "backend/server.go\nshared/config.go\n", testOpts.Out.String())
+}
+
+func TestMainCoreReport_unowned(t *testing.T) {
+	testOpts := internal.NewTestRootOpts()
+
+	testOpts.MockCodeowners([]string{
+		"*.go @org/backend",
+	})
+	testOpts.MockWorkingDirectory([]string{
+		"main.go",
+		"README.md",
+		"docs/guide.md",
+	})
+
+	err := mainCore(toActual(testOpts), []string{"report", "--unowned"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "README.md\ndocs/guide.md\n", testOpts.Out.String())
+}
+
 func TestMainCoreReport_emptyWorkingTree(t *testing.T) {
 	testOpts := internal.NewTestRootOpts()
 

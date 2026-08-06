@@ -9,11 +9,24 @@ import (
 )
 
 func newCmdReport(opts *RootCmdOptions) *cobra.Command {
-	return &cobra.Command{
-		Use:     "report",
-		Short:   "Report on current working directory",
-		Long:    "Show report of the owners of all files in the current working directory",
-		Example: "  $ gh codeowners report",
+	var unowned bool
+
+	reportCmd := &cobra.Command{
+		Use:   "report [team]",
+		Short: "Report on current working directory",
+		Long:  "Show a report of the owners of all files in the current working directory, or list files owned by a team or unowned files",
+		Example: `  $ gh codeowners report
+  $ gh codeowners report @org/team
+  $ gh codeowners report --unowned`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
+				return err
+			}
+			if unowned && len(args) == 1 {
+				return fmt.Errorf("team argument cannot be used with --unowned")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			edittedFilesScanner, err := GetEdittedFilesScanner(cmd, opts)
 
@@ -25,6 +38,22 @@ func newCmdReport(opts *RootCmdOptions) *cobra.Command {
 
 			if err != nil {
 				return fmt.Errorf("error getting codeowners info: %v", err)
+			}
+
+			if len(args) == 1 || unowned {
+				var team string
+				if len(args) == 1 {
+					team = args[0]
+				}
+
+				for edittedFilesScanner.Scan() {
+					owners := codeowners.FindOwners(edittedFilesScanner.Bytes())
+					if (unowned && len(owners) == 0) || (!unowned && codeowners.IsOwnedBy(edittedFilesScanner.Bytes(), team)) {
+						cmd.Println(edittedFilesScanner.Text())
+					}
+				}
+
+				return edittedFilesScanner.Err()
 			}
 
 			singleOwnerReport := map[string]int{}
@@ -72,4 +101,7 @@ func newCmdReport(opts *RootCmdOptions) *cobra.Command {
 			return nil
 		},
 	}
+
+	reportCmd.Flags().BoolVar(&unowned, "unowned", false, "List unowned files")
+	return reportCmd
 }

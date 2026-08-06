@@ -13,6 +13,8 @@ gh extension install justindbaur/gh-codeowners
 ### report
 
 Run `gh codeowners report` to get a report of how many files each team owns in your current working tree.
+Run `gh codeowners report [team]` to list the files in the working tree owned by that team.
+Use `gh codeowners report --unowned` to list unowned files in the working tree.
 
 ### stage
 
